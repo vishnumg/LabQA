@@ -115,3 +115,4 @@ A simple multi-branch QC dashboard that:
 - Include summary statistics and list of alerts triggered in the reporting period.
 
 ---
+[UI Reference](ui_reference.tsx)

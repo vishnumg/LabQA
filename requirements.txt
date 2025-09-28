@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pyjwt
+bcrypt
+psycopg2-binary
+pydantic
+pytest
+httpx
+sqlmodel
+python-dotenv
