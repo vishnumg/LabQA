@@ -895,6 +895,28 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                 if not b64:
                     continue
                 binary = base64.b64decode(b64)
+                # Extract PNG dimensions to preserve aspect ratio when scaling into page width
+                orig_w = 0
+                orig_h = 0
+                try:
+                    if len(binary) > 24 and binary[12:16] == b'IHDR':
+                        orig_w = int.from_bytes(binary[16:20], 'big')
+                        orig_h = int.from_bytes(binary[20:24], 'big')
+                except Exception:
+                    orig_w = 0
+                    orig_h = 0
+                # Fallback dimensions if header parse failed (approx previous 600x180 design)
+                if not orig_w or not orig_h:
+                    orig_w, orig_h = 1200, 360
+                # Determine target width (fit within typical content width ~ 6.3in minus margins)
+                try:
+                    max_width_pt_env = os.getenv('LABQA_GDOC_CHART_MAX_WIDTH_PT')
+                    MAX_WIDTH_PT = int(max_width_pt_env) if max_width_pt_env else 460
+                except Exception:
+                    MAX_WIDTH_PT = 460
+                aspect = orig_h / orig_w if orig_w else 0.3
+                target_width_pt = MAX_WIDTH_PT
+                target_height_pt = max(60, round(target_width_pt * aspect))
                 metadata = json.dumps({'name': f"{title} - {name}.png"}).encode()
                 boundary = 'labqa_boundary_' + uuid4().hex
                 body_parts = [
@@ -920,7 +942,8 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                         urllib.request.urlopen(perm_req, timeout=30).read()  # nosec B310
                     except Exception:
                         pass
-                    uploaded.append({'fileId': file_id, 'name': name})
+                    uploaded.append({'fileId': file_id, 'name': name,
+                                    'w_pt': target_width_pt, 'h_pt': target_height_pt})
             except Exception as ie:  # pragma: no cover
                 uploaded.append({'error': f'upload_failed:{type(ie).__name__}'})
         if uploaded:
@@ -939,21 +962,20 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                 end_index = 1
             insert_index = charts_marker_index if charts_marker_index else (end_index - 1)
             image_requests: list[dict] = []
-            charts_heading = f"\nCHARTS ({len(uploaded)})\n"
+            charts_heading = f"\nCHARTS\n"
             image_requests.append(
                 {'insertText': {'location': {'index': insert_index}, 'text': charts_heading}})
             insert_index += len(charts_heading)
             for entry in uploaded:
                 if 'fileId' in entry:
                     file_id = entry['fileId']
-                    caption = f"{entry.get('name','Chart')}\n"
-                    image_requests.append(
-                        {'insertText': {'location': {'index': insert_index}, 'text': caption}})
-                    insert_index += len(caption)
+                    # Use stored scaled size (default fallback if missing)
+                    w_pt = entry.get('w_pt', 460)
+                    h_pt = entry.get('h_pt', 140)
                     image_requests.append({'insertInlineImage': {
                         'location': {'index': insert_index},
                         'uri': f'https://drive.google.com/uc?id={file_id}',
-                        'objectSize': {'height': {'magnitude': 180, 'unit': 'PT'}, 'width': {'magnitude': 600, 'unit': 'PT'}}
+                        'objectSize': {'height': {'magnitude': h_pt, 'unit': 'PT'}, 'width': {'magnitude': w_pt, 'unit': 'PT'}}
                     }})
                     insert_index += 1
                     image_requests.append(
@@ -996,12 +1018,6 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                         style_reqs.append({'updateParagraphStyle': {
                             'range': {'startIndex': start_i, 'endIndex': end_i - 1},
                             'paragraphStyle': {'namedStyleType': 'HEADING_2'},
-                            'fields': 'namedStyleType'
-                        }})
-                    elif full_para.endswith('L1') or full_para.endswith('L2') or full_para.endswith('L3'):
-                        style_reqs.append({'updateParagraphStyle': {
-                            'range': {'startIndex': start_i, 'endIndex': end_i - 1},
-                            'paragraphStyle': {'namedStyleType': 'HEADING_3'},
                             'fields': 'namedStyleType'
                         }})
                 if style_reqs:

@@ -81,7 +81,9 @@ export default function MedicalLabQADashboard() {
         accreditation: 'ISO 15189',
         instrument: 'AU5800 Chemistry Analyzer'
     })
-    const [narrativeText, setNarrativeText] = useState<string>(`Quality Control (QC) was performed for the reporting period. Levey–Jennings charts and Westgard rules were applied to monitor assay performance. No significant trends or shifts were observed unless otherwise noted. All out-of-control events were investigated according to SOP with corrective actions documented.`)
+    const [narrativeText, setNarrativeText] = useState<string>('') // Description (was internal QC narrative)
+    const [preparedBy, setPreparedBy] = useState<string>('')
+    const [reviewedBy, setReviewedBy] = useState<string>('')
 
     // Display helpers (avoid showing raw UUIDs)
     const branchName = (id: string | undefined | null) => {
@@ -875,39 +877,12 @@ export default function MedicalLabQADashboard() {
     }, [recentProcessed, selectedBranch, dateRange.start, dateRange.end])
 
     const renderReports = () => {
-        // Narrative builder
-        const buildNarrative = () => {
-            const lines: string[] = []
-            const shifts = allReportStats.filter(r => r.rules['1₂s'] > 2 || r.rules['2₂s'] > 0).map(r => `${parameters.find(p => p.id === r.parameter)?.name || r.parameter} ${r.level}`)
-            const trends = allReportStats.filter(r => r.rules['10ₓ'] > 0).map(r => `${parameters.find(p => p.id === r.parameter)?.name || r.parameter} ${r.level}`)
-            lines.push('Controls executed for selected branch. Westgard rules monitored throughout period across all included parameters.')
-            if (shifts.length) lines.push(`Shift indications (1:2S / 2:2S) observed in: ${shifts.join(', ')}.`)
-            if (trends.length) lines.push(`Long-run trend (10x) indications in: ${trends.join(', ')}.`)
-            if (!shifts.length && !trends.length) lines.push('No material shift or long-run trend indications detected.')
-            lines.push('Out-of-control events to be investigated per SOP (reagent, calibration, instrument checks).')
-            return lines
-        }
-        const narrative = buildNarrative()
         return (
             <div className="space-y-8" ref={reportRootRef} data-report-root>
-                {/* Lab Details injected earlier */}
-                {/* Narrative (editable) */}
+                {/* Description only */}
                 <div className="bg-white shadow rounded-lg p-4 text-sm" ref={narrativeRef} data-report-section="narrative">
-                    <h3 className="font-semibold mb-2 flex items-center justify-between">Internal QC Narrative
-                        <span className="text-xs text-gray-400 font-normal">Editable</span>
-                    </h3>
-                    <div className="grid md:grid-cols-2 gap-6">
-                        <div>
-                            <ul className="list-disc pl-5 space-y-1 mb-4">
-                                {narrative.map((l, i) => (<li key={i}>{l}</li>))}
-                            </ul>
-                        </div>
-                        <div className="flex flex-col gap-2">
-                            <label className="text-xs font-medium text-gray-600">Custom Narrative Override</label>
-                            <textarea value={narrativeText} onChange={e => setNarrativeText(e.target.value)} rows={7} className="w-full border rounded p-2 text-xs font-mono leading-relaxed focus:ring-2 focus:ring-blue-500" />
-                            <p className="text-[10px] text-gray-500">This text will supersede the auto-generated bullet points in exports (CSV/PDF).</p>
-                        </div>
-                    </div>
+                    <h3 className="font-semibold mb-2">Description</h3>
+                    <textarea value={narrativeText} onChange={e => setNarrativeText(e.target.value)} rows={6} className="w-full border rounded p-2 text-xs focus:ring-2 focus:ring-blue-500" placeholder="Enter description to include in export." />
                 </div>
                 {/* Existing Front Matter follows */}
                 <div className="bg-white shadow rounded-lg p-4 text-sm grid md:grid-cols-2 gap-4" ref={frontMatterRef} data-report-section="front-matter">
@@ -917,9 +892,13 @@ export default function MedicalLabQADashboard() {
                         <div><span className="font-medium">Period:</span> {dateRange.start} → {dateRange.end}</div>
                         <div><span className="font-medium">Generated:</span> {new Date().toLocaleString()}</div>
                     </div>
-                    <div className="flex flex-col gap-2">
-                        <div><span className="font-medium">Prepared By:</span> <span className="inline-block border-b border-gray-300 w-40 ml-2" /></div>
-                        <div><span className="font-medium">Reviewed By:</span> <span className="inline-block border-b border-gray-300 w-40 ml-2" /></div>
+                    <div className="flex flex-col gap-2 text-xs">
+                        <label className="flex items-center gap-2"> <span className="font-medium w-20">Prepared By</span>
+                            <input value={preparedBy} onChange={e => setPreparedBy(e.target.value)} placeholder="Name" className="flex-1 border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                        </label>
+                        <label className="flex items-center gap-2"> <span className="font-medium w-20">Reviewed By</span>
+                            <input value={reviewedBy} onChange={e => setReviewedBy(e.target.value)} placeholder="Name" className="flex-1 border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                        </label>
                         <div><span className="font-medium">Version:</span> {dateRange.start.slice(0, 7)}</div>
                     </div>
                 </div>
@@ -974,7 +953,7 @@ export default function MedicalLabQADashboard() {
                 {/* Combined Z-Score Charts */}
                 <div className="bg-white shadow rounded-lg p-4" ref={chartsRef} data-report-section="charts">
                     <h3 className="font-semibold mb-3 text-sm">Combined Z-Score Charts</h3>
-                    <div className="space-y-8" data-report-charts-grid>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6" data-report-charts-grid>
                         {allParameterIdsForBranch.map(pid => {
                             const param = parameters.find(p => p.id === pid)
                             const rows = recentProcessed.filter(r => r.branch === selectedBranch && r.parameter === pid && new Date(r.date) >= new Date(dateRange.start) && new Date(r.date) <= new Date(dateRange.end))
@@ -984,12 +963,9 @@ export default function MedicalLabQADashboard() {
                             const dataL3 = rows.filter(r => r.level === 'L3').map(r => ({ date: r.date, z: r.zScore }))
                             const domain = [-3.5, 3.5]
                             return (
-                                <div key={pid} className="border rounded-md p-4" data-combined-chart={pid}>
-                                    <div className="flex items-center justify-between mb-2 text-xs font-semibold">
+                                <div key={pid} className="border rounded-md p-4 bg-white" data-combined-chart={pid}>
+                                    <div className="mb-2 text-xs font-semibold">
                                         <span>{param?.name || pid}</span>
-                                        <div className="flex gap-3 text-[10px] text-gray-500">
-                                            <span>L1:{dataL1.length}</span><span>L2:{dataL2.length}</span><span>L3:{dataL3.length}</span>
-                                        </div>
                                     </div>
                                     <div className="h-48">
                                         <ResponsiveContainer width="100%" height="100%">
