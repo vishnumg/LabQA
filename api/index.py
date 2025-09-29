@@ -933,15 +933,18 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                     meta = json.loads(uresp.read().decode())
                 file_id = meta.get('id')
                 if file_id:
-                    try:
-                        perm_body = json.dumps({'role': 'reader', 'type': 'anyone'}).encode()
-                        perm_req = urllib.request.Request(
-                            f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions', data=perm_body, method='POST')
-                        perm_req.add_header('Authorization', f'Bearer {access_token}')
-                        perm_req.add_header('Content-Type', 'application/json')
-                        urllib.request.urlopen(perm_req, timeout=30).read()  # nosec B310
-                    except Exception:
-                        pass
+                    # Optional public permission (skip when LABQA_SKIP_DRIVE_PERMISSIONS=1)
+                    skip_perm = os.getenv('LABQA_SKIP_DRIVE_PERMISSIONS', '0') == '1'
+                    if not skip_perm:
+                        try:
+                            perm_body = json.dumps({'role': 'reader', 'type': 'anyone'}).encode()
+                            perm_req = urllib.request.Request(
+                                f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions', data=perm_body, method='POST')
+                            perm_req.add_header('Authorization', f'Bearer {access_token}')
+                            perm_req.add_header('Content-Type', 'application/json')
+                            urllib.request.urlopen(perm_req, timeout=20).read()  # nosec B310
+                        except Exception:
+                            pass
                     uploaded.append({'fileId': file_id, 'name': name,
                                     'w_pt': target_width_pt, 'h_pt': target_height_pt})
             except Exception as ie:  # pragma: no cover

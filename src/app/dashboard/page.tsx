@@ -592,7 +592,7 @@ export default function MedicalLabQADashboard() {
                                         await wait(60)
                                         continue
                                     }
-                                    const canvas = await html2canvas(container, { backgroundColor: '#ffffff', scale: 2, useCORS: true })
+                                    const canvas = await html2canvas(container, { backgroundColor: '#ffffff', scale: 1, useCORS: true })
                                     const dataUrl = canvas.toDataURL('image/png')
                                     if (dataUrl.startsWith('data:image/png;base64,')) {
                                         base64 = dataUrl.substring('data:image/png;base64,'.length)
@@ -619,7 +619,7 @@ export default function MedicalLabQADashboard() {
                     const chartsSection = document.querySelector('[data-report-section="charts"]') as HTMLElement | null
                     if (chartsSection && html2canvas) {
                         try {
-                            const canvas = await html2canvas(chartsSection, { backgroundColor: '#ffffff', scale: 2, useCORS: true })
+                            const canvas = await html2canvas(chartsSection, { backgroundColor: '#ffffff', scale: 1, useCORS: true })
                             const dataUrl = canvas.toDataURL('image/png')
                             if (dataUrl.startsWith('data:image/png;base64,')) {
                                 const base64 = dataUrl.substring('data:image/png;base64,'.length)
