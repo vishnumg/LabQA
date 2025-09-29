@@ -15,7 +15,9 @@
         "react-dom": "19.0.0-rc-1eaccd82-20240816",
         "react-is": "^19.1.1",
         "recharts": "^3.2.1",
-        "html2canvas": "^1.4.1"
+        "html2canvas": "^1.4.1",
+        "jspdf": "^2.5.1",
+        "jspdf-autotable": "^3.8.2"
     },
     "devDependencies": {
         "@tailwindcss/postcss": "^4.1.13",

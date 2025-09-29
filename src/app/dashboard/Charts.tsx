@@ -42,7 +42,7 @@ export default function Charts({ selectedBranch, selectedParameter, branches, pa
         const upper1 = mean != null && sd != null ? mean + sd : undefined
         const lower1 = mean != null && sd != null ? mean - sd : undefined
         return (
-            <div key={level} className="bg-white rounded-lg shadow p-4 space-y-2">
+            <div key={level} className="bg-white rounded-lg shadow p-4 space-y-2" data-chart-level={level}>
                 <div className="flex justify-between items-center">
                     <h3 className="font-semibold text-sm">{parameters.find(p => p.id === selectedParameter)?.name || selectedParameter} – {level}</h3>
                     {mean != null && sd != null && (
