@@ -887,28 +887,28 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
             except Exception:
                 pass
         uploaded: list[dict] = []
-        # If after fallback no images, we still proceed (just omit charts section heading later)
-        for idx, img in enumerate(chart_images):
+        # Parallel upload (threaded) to reduce total wall time; fallback to sequential if concurrency=1
+        try:
+            import threading
+            import queue  # local import to avoid overhead when no images
+            worker_count_env = os.getenv('LABQA_DRIVE_UPLOAD_WORKERS')
             try:
-                b64 = img.get('pngBase64') if isinstance(img, dict) else None
-                name = img.get('name') if isinstance(img, dict) else f'Chart {idx+1}'
-                if not b64:
-                    continue
-                binary = base64.b64decode(b64)
-                # Extract PNG dimensions to preserve aspect ratio when scaling into page width
-                orig_w = 0
-                orig_h = 0
+                WORKERS = max(1, min(8, int(worker_count_env))) if worker_count_env else 3
+            except Exception:
+                WORKERS = 3
+            task_q: 'queue.Queue[tuple[int,dict]]' = queue.Queue()
+            result_q: 'queue.Queue[tuple[int,dict]]' = queue.Queue()
+
+            def build_body(name: str, binary: bytes) -> tuple[bytes, int, int, str]:
+                orig_w = orig_h = 0
                 try:
                     if len(binary) > 24 and binary[12:16] == b'IHDR':
                         orig_w = int.from_bytes(binary[16:20], 'big')
                         orig_h = int.from_bytes(binary[20:24], 'big')
                 except Exception:
-                    orig_w = 0
-                    orig_h = 0
-                # Fallback dimensions if header parse failed (approx previous 600x180 design)
+                    orig_w = orig_h = 0
                 if not orig_w or not orig_h:
                     orig_w, orig_h = 1200, 360
-                # Determine target width (fit within typical content width ~ 6.3in minus margins)
                 try:
                     max_width_pt_env = os.getenv('LABQA_GDOC_CHART_MAX_WIDTH_PT')
                     MAX_WIDTH_PT = int(max_width_pt_env) if max_width_pt_env else 460
@@ -925,30 +925,88 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                 ]
                 body = b''.join([part.encode() if isinstance(
                     part, str) else part for part in body_parts]) + binary + f'\r\n--{boundary}--\r\n'.encode()
-                upload_req = urllib.request.Request(
-                    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', data=body, method='POST')
-                upload_req.add_header('Authorization', f'Bearer {access_token}')
-                upload_req.add_header('Content-Type', f'multipart/related; boundary={boundary}')
-                with urllib.request.urlopen(upload_req, timeout=60) as uresp:  # nosec B310
-                    meta = json.loads(uresp.read().decode())
-                file_id = meta.get('id')
-                if file_id:
-                    # Optional public permission (skip when LABQA_SKIP_DRIVE_PERMISSIONS=1)
-                    skip_perm = os.getenv('LABQA_SKIP_DRIVE_PERMISSIONS', '0') == '1'
-                    if not skip_perm:
-                        try:
-                            perm_body = json.dumps({'role': 'reader', 'type': 'anyone'}).encode()
-                            perm_req = urllib.request.Request(
-                                f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions', data=perm_body, method='POST')
-                            perm_req.add_header('Authorization', f'Bearer {access_token}')
-                            perm_req.add_header('Content-Type', 'application/json')
-                            urllib.request.urlopen(perm_req, timeout=20).read()  # nosec B310
-                        except Exception:
-                            pass
-                    uploaded.append({'fileId': file_id, 'name': name,
-                                    'w_pt': target_width_pt, 'h_pt': target_height_pt})
-            except Exception as ie:  # pragma: no cover
-                uploaded.append({'error': f'upload_failed:{type(ie).__name__}'})
+                return body, target_width_pt, target_height_pt, boundary
+
+            for idx, img in enumerate(chart_images):
+                b64 = img.get('pngBase64') if isinstance(img, dict) else None
+                raw_name = img.get('name') if isinstance(img, dict) else f'Chart {idx+1}'
+                name = str(raw_name) if raw_name is not None else f'Chart {idx+1}'
+                if not b64:
+                    continue
+                try:
+                    binary = base64.b64decode(b64)
+                except Exception:
+                    continue
+                body, w_pt, h_pt, boundary = build_body(name, binary)
+                task_q.put((idx, {'name': name, 'body': body, 'w_pt': w_pt,
+                           'h_pt': h_pt, 'boundary': boundary}))
+
+            for _ in range(WORKERS):
+                task_q.put((-1, {}))  # sentinel
+
+            skip_perm_global = os.getenv('LABQA_SKIP_DRIVE_PERMISSIONS', '0') == '1'
+
+            def worker():  # pragma: no cover (network threading)
+                while True:
+                    idx, payload = task_q.get()
+                    if idx == -1:
+                        # BUGFIX: previously we broke without calling task_done() for the sentinel
+                        # which caused task_q.join() to block indefinitely (leading to 5-minute timeout).
+                        task_q.task_done()
+                        break
+                    name = payload.get('name')
+                    body = payload.get('body')
+                    w_pt = payload.get('w_pt')
+                    h_pt = payload.get('h_pt')
+                    boundary = payload.get('boundary') or 'labqa_boundary_fallback'
+                    if body is None:
+                        result_q.put((idx, {'error': 'missing_body'}))
+                        task_q.task_done()
+                        continue
+                    try:
+                        upload_req = urllib.request.Request(
+                            'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', data=body, method='POST')
+                        upload_req.add_header('Authorization', f'Bearer {access_token}')
+                        upload_req.add_header(
+                            'Content-Type', f'multipart/related; boundary={boundary}')
+                        with urllib.request.urlopen(upload_req, timeout=60) as uresp:  # nosec B310
+                            meta = json.loads(uresp.read().decode())
+                        file_id = meta.get('id')
+                        if file_id and not skip_perm_global:
+                            try:
+                                perm_body = json.dumps(
+                                    {'role': 'reader', 'type': 'anyone'}).encode()
+                                perm_req = urllib.request.Request(
+                                    f'https://www.googleapis.com/drive/v3/files/{file_id}/permissions', data=perm_body, method='POST')
+                                perm_req.add_header('Authorization', f'Bearer {access_token}')
+                                perm_req.add_header('Content-Type', 'application/json')
+                                urllib.request.urlopen(perm_req, timeout=20).read()  # nosec B310
+                            except Exception:
+                                pass
+                        if file_id:
+                            result_q.put(
+                                (idx, {'fileId': file_id, 'name': name, 'w_pt': w_pt, 'h_pt': h_pt}))
+                        else:
+                            result_q.put((idx, {'error': 'missing_file_id'}))
+                    except Exception as e:  # pragma: no cover
+                        result_q.put((idx, {'error': f'upload_failed:{type(e).__name__}'}))
+                    finally:
+                        task_q.task_done()
+
+            threads = [threading.Thread(target=worker, daemon=True) for _ in range(WORKERS)]
+            for t in threads:
+                t.start()
+            task_q.join()
+            # Drain results preserving original order (sort by idx)
+            results: list[tuple[int, dict]] = []
+            while not result_q.empty():
+                results.append(result_q.get())
+            results.sort(key=lambda x: x[0])
+            for _, r in results:
+                uploaded.append(r)
+        except Exception as e:
+            # Fallback: no concurrency (should rarely hit unless threading import fails)
+            uploaded.append({'error': f'parallel_init_failed:{type(e).__name__}'})
         if uploaded:
             try:
                 get_req = urllib.request.Request(
