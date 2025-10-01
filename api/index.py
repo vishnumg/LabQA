@@ -20,12 +20,6 @@ from backend import db, schemas
 from backend.models import Branch, Target, QcEntry, User, Parameter
 import uuid
 
-try:  # optional chart svg conversion for docx
-    import cairosvg  # type: ignore
-except Exception:
-    cairosvg = None  # type: ignore
-
-
 SECRET = os.getenv('LABQA_AUTH_SECRET', 'dev-insecure-secret')
 TOKEN_TTL_SECONDS = 60 * 60 * 8  # 8h
 
@@ -236,6 +230,182 @@ def list_branches(session=Depends(db.session), claims=Depends(require_claims)):
     if claims.get("role") == "technician" and claims.get("branch_id"):
         branches = [b for b in branches if str(b.id) == claims.get("branch_id")]
     return schemas.BranchList(items=[schemas.BranchOut(id=str(b.id), name=b.name) for b in branches])
+
+
+# ---------------- Admin Branch Management ----------------
+@app.post("/api/admin/branches", response_model=schemas.BranchOut)
+def admin_create_branch(body: schemas.BranchCreate, session=Depends(db.session), claims=Depends(require_claims)):
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name_required")
+    # Simple uniqueness check on name (case-insensitive)
+    existing = session.exec(select(Branch).where(Branch.name == name)).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="branch_exists")
+    b = Branch(name=name)
+    session.add(b)
+    session.commit()
+    session.refresh(b)
+    return schemas.BranchOut(id=str(b.id), name=b.name)
+
+
+@app.put("/api/admin/branches/{branch_id}", response_model=schemas.BranchOut)
+def admin_update_branch(branch_id: str, body: schemas.BranchUpdate, session=Depends(db.session), claims=Depends(require_claims)):
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        b = session.get(Branch, branch_id)
+    except Exception:
+        b = None
+    if not b:
+        raise HTTPException(status_code=404, detail="branch_not_found")
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="name_required")
+    conflict = session.exec(select(Branch).where(
+        Branch.name == new_name, Branch.id != b.id)).first()
+    if conflict:
+        raise HTTPException(status_code=409, detail="branch_exists")
+    b.name = new_name
+    session.add(b)
+    session.commit()
+    session.refresh(b)
+    return schemas.BranchOut(id=str(b.id), name=b.name)
+
+
+@app.delete("/api/admin/branches/{branch_id}")
+def admin_delete_branch(branch_id: str, session=Depends(db.session), claims=Depends(require_claims)):
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        b = session.get(Branch, branch_id)
+    except Exception:
+        b = None
+    if not b:
+        raise HTTPException(status_code=404, detail="branch_not_found")
+    try:
+        session.delete(b)
+        session.commit()
+    except Exception:
+        # Likely FK constraint (targets, qc entries, users)
+        session.rollback()
+        raise HTTPException(status_code=409, detail="branch_in_use")
+    return {"ok": True}
+
+
+# ---------------- Admin Technician Management ----------------
+@app.get("/api/admin/technicians", response_model=schemas.TechnicianList)
+def admin_list_technicians(session=Depends(db.session), claims=Depends(require_claims)):
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    rows = session.exec(select(User).where(User.role == 'technician').order_by(
+        User.created_at)).all()  # type: ignore[arg-type]
+    items = [schemas.TechnicianOut(id=str(u.id), email=u.email, branch_id=str(
+        u.branch_id) if u.branch_id else None, created_at=u.created_at) for u in rows]
+    return schemas.TechnicianList(items=items)
+
+
+@app.post("/api/admin/technicians", response_model=schemas.TechnicianOut)
+def admin_create_technician(body: schemas.TechnicianCreate, session=Depends(db.session), claims=Depends(require_claims)):
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    email = body.email.strip().lower()
+    if not email or '@' not in email:
+        raise HTTPException(status_code=400, detail='invalid_email')
+    existing = session.exec(select(User).where(User.email == email)).first()
+    if existing:
+        raise HTTPException(status_code=409, detail='user_exists')
+    if body.branch_id:
+        try:
+            _b = session.get(Branch, body.branch_id)
+        except Exception:
+            _b = None
+        if not _b:
+            raise HTTPException(status_code=400, detail='invalid_branch')
+    pw_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
+    import uuid as _uuid  # local import to avoid top-level churn
+    branch_uuid = _uuid.UUID(str(body.branch_id)) if body.branch_id else None
+    u = User(email=email, password_hash=pw_hash, role='technician', branch_id=branch_uuid)
+    session.add(u)
+    session.commit()
+    session.refresh(u)
+    return schemas.TechnicianOut(id=str(u.id), email=u.email, branch_id=str(u.branch_id) if u.branch_id else None, created_at=u.created_at)
+
+
+@app.put("/api/admin/technicians/{user_id}", response_model=schemas.TechnicianOut)
+def admin_update_technician(user_id: str, body: schemas.TechnicianUpdate, session=Depends(db.session), claims=Depends(require_claims)):
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        u = session.get(User, user_id)
+    except Exception:
+        u = None
+    if not u or u.role != 'technician':
+        raise HTTPException(status_code=404, detail='technician_not_found')
+    if body.email is not None:
+        new_email = body.email.strip().lower()
+        if not new_email or '@' not in new_email:
+            raise HTTPException(status_code=400, detail='invalid_email')
+        conflict = session.exec(select(User).where(
+            User.email == new_email, User.id != u.id)).first()
+        if conflict:
+            raise HTTPException(status_code=409, detail='user_exists')
+        u.email = new_email
+    if body.branch_id is not None:
+        if body.branch_id:
+            try:
+                _b = session.get(Branch, body.branch_id)
+            except Exception:
+                _b = None
+            if not _b:
+                raise HTTPException(status_code=400, detail='invalid_branch')
+            import uuid as _uuid  # local import
+            u.branch_id = _uuid.UUID(str(body.branch_id))
+        else:
+            u.branch_id = None
+    session.add(u)
+    session.commit()
+    session.refresh(u)
+    return schemas.TechnicianOut(id=str(u.id), email=u.email, branch_id=str(u.branch_id) if u.branch_id else None, created_at=u.created_at)
+
+
+@app.delete("/api/admin/technicians/{user_id}")
+def admin_delete_technician(user_id: str, session=Depends(db.session), claims=Depends(require_claims)):
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        u = session.get(User, user_id)
+    except Exception:
+        u = None
+    if not u or u.role != 'technician':
+        raise HTTPException(status_code=404, detail='technician_not_found')
+    try:
+        session.delete(u)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise HTTPException(status_code=409, detail='delete_failed')
+    return {'ok': True}
+
+
+@app.post("/api/admin/technicians/{user_id}/password")
+def admin_change_technician_password(user_id: str, body: schemas.PasswordChange, session=Depends(db.session), claims=Depends(require_claims)):
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        u = session.get(User, user_id)
+    except Exception:
+        u = None
+    if not u or u.role != 'technician':
+        raise HTTPException(status_code=404, detail='technician_not_found')
+    if not body.password or len(body.password) < 6:
+        raise HTTPException(status_code=400, detail='weak_password')
+    u.password_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
+    session.add(u)
+    session.commit()
+    return {'ok': True}
 
 
 @app.get("/api/parameters", response_model=schemas.ParameterList)

@@ -51,7 +51,7 @@ export default function MedicalLabQADashboard() {
     if (!ready || (!claims && !redirected)) {
         return <div className="min-h-screen flex items-center justify-center text-gray-600">Loading…</div>
     }
-    const [currentTab, setCurrentTab] = useState<'dataEntry' | 'charts' | 'alerts' | 'targets' | 'reports'>('dataEntry')
+    const [currentTab, setCurrentTab] = useState<'dataEntry' | 'charts' | 'alerts' | 'targets' | 'reports' | 'admin'>('dataEntry')
     const [selectedBranch, setSelectedBranch] = useState('')
     const [selectedParameter, setSelectedParameter] = useState('')
     const [dateRange, setDateRange] = useState({
@@ -84,6 +84,16 @@ export default function MedicalLabQADashboard() {
     const [narrativeText, setNarrativeText] = useState<string>('') // Description (was internal QC narrative)
     const [preparedBy, setPreparedBy] = useState<string>('')
     const [reviewedBy, setReviewedBy] = useState<string>('')
+    // Admin management state
+    const isAdmin = role === 'admin'
+    const [technicians, setTechnicians] = useState<Array<{ id: string; email: string; branch_id?: string | null; created_at?: string }>>([])
+    const [techLoading, setTechLoading] = useState(false)
+    const [branchCreateName, setBranchCreateName] = useState('')
+    const [branchEdit, setBranchEdit] = useState<{ id: string; name: string } | null>(null)
+    const [techCreate, setTechCreate] = useState<{ email: string; password: string; branch_id: string | '' }>({ email: '', password: '', branch_id: '' })
+    const [techEdit, setTechEdit] = useState<{ id: string; email: string; branch_id: string | '' } | null>(null)
+    const [pwReset, setPwReset] = useState<{ id: string; password: string } | null>(null)
+    const [adminMessage, setAdminMessage] = useState<string | null>(null)
 
     // Display helpers (avoid showing raw UUIDs)
     const branchName = (id: string | undefined | null) => {
@@ -149,6 +159,22 @@ export default function MedicalLabQADashboard() {
         } else if (!targetForm.branch && branches.length) setTargetForm((f: any) => ({ ...f, branch: branches[0].id }))
     }, [branches, targetForm.branch, isTech, userBranch])
     useEffect(() => { if (!targetForm.parameter && parameters.length) setTargetForm((f: any) => ({ ...f, parameter: parameters[0].id })) }, [parameters, targetForm.parameter])
+    // Load technicians lazily when admin tab selected
+    useEffect(() => {
+        if (!isAdmin) return
+        if (currentTab !== 'admin') return
+        let cancelled = false
+        const loadTechs = async () => {
+            setTechLoading(true)
+            const r = await api.adminListTechnicians()
+            if (!cancelled) {
+                if (r.ok && Array.isArray(r.json?.items)) setTechnicians(r.json.items)
+                setTechLoading(false)
+            }
+        }
+        loadTechs()
+        return () => { cancelled = true }
+    }, [currentTab, isAdmin])
     // Fetch QC for selected parameter
     useEffect(() => {
         let cancelled = false
@@ -417,99 +443,6 @@ export default function MedicalLabQADashboard() {
         return () => { if (dispose) dispose() }
     }, [])
 
-    // Backend export (pdf/docx/html) via /api/report/export
-    const backendExport = async (format: 'pdf' | 'docx' | 'html') => {
-        if (exporting) return
-        setExporting(true)
-        try {
-            const apiBase = process.env.NEXT_PUBLIC_API_BASE || ''
-            if (!apiBase) {
-                console.warn('NEXT_PUBLIC_API_BASE not set; falling back to relative /api which may still be Next.js route')
-            }
-            // Ensure charts are rendered: wait a short tick & retry SVG capture if initially missing
-            const wait = (ms: number) => new Promise(r => setTimeout(r, ms))
-            const maxChartWaitMs = 500
-            const startTs = performance.now()
-            let chartContainers = Array.from(document.querySelectorAll('[data-report-lj-parameter]'))
-            if (!chartContainers.length) {
-                // allow layout/render flush
-                await wait(50)
-                chartContainers = Array.from(document.querySelectorAll('[data-report-lj-parameter]'))
-            }
-
-            // Try a few rapid retries if first SVGs not found
-            const ensureChartsReady = async () => {
-                for (let attempt = 0; attempt < 5; attempt++) {
-                    const missing = allParameterIdsForBranch.filter(pid => !document.querySelector(`[data-report-lj-parameter="${pid}"] svg`))
-                    if (!missing.length) return true
-                    await wait(60)
-                }
-                return false
-            }
-            const chartsReady = await ensureChartsReady()
-            if (!chartsReady) {
-                console.warn('Some charts not ready for export; proceeding anyway')
-            }
-            // Gather parameter stats across all parameters for selected branch (all levels separate)
-            const payloadParameters = allParameterIdsForBranch.map(pid => {
-                const name = parameters.find(p => p.id === pid)?.name || pid
-                // Capture the combined SVG once per parameter (single multi-level chart)
-                const containerSvgEl = document.querySelector(`[data-report-lj-parameter="${pid}"] svg`)
-                const containerSvg = containerSvgEl ? (containerSvgEl as SVGElement).outerHTML : undefined
-                if (!containerSvg) {
-                    console.debug('No SVG found for parameter during export', { pid })
-                }
-                const levelStats = (['L1', 'L2', 'L3'] as const).map(level => {
-                    const rows = recentProcessed.filter(q => q.branch === selectedBranch && q.parameter === pid && q.level === level && q.date >= dateRange.start && q.date <= dateRange.end)
-                    if (!rows.length) return null
-                    const values = rows.map(r => r.value)
-                    const mean = values.reduce((a, b) => a + b, 0) / values.length
-                    const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / values.length
-                    const sd = Math.sqrt(variance)
-                    const cv = sd && mean ? (sd / mean) * 100 : 0
-                    return { level, stats: { mean, sd, cv, n: values.length } }
-                }).filter(Boolean) as any[]
-                // Attach svg only to the first level entry to avoid duplicates in report charts section
-                return levelStats.map((ls, idx) => ({ id: pid + '_' + ls.level, name: name + ' ' + ls.level, unit: '', level: ls.level, stats: ls.stats, svg: idx === 0 ? containerSvg : undefined }))
-            }).flat()
-            const body = {
-                branchName: branchName(selectedBranch),
-                period: { from: dateRange.start, to: dateRange.end },
-                narrative: narrativeText,
-                parameters: payloadParameters,
-                format
-            }
-            const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
-            const targetUrl = `${apiBase || ''}/api/report/export`.replace(/([^:])\/\//g, '$1/')
-            const res = await fetch(targetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) }, body: JSON.stringify(body) })
-            if (!res.ok) {
-                let msg = 'Export failed'
-                try { const j = await res.json(); msg = j.error || msg } catch { }
-                throw new Error(msg)
-            }
-            const fallback = res.headers.get('X-Export-Fallback')
-            if (format === 'html' || (fallback && fallback.startsWith('pdf-') && format === 'pdf') || (fallback && fallback.startsWith('docx-') && format === 'docx')) {
-                // Server provided HTML instead of requested binary (fallback scenario)
-                const text = await res.text()
-                const w = window.open('', '_blank')
-                if (w) { w.document.write(text); w.document.close() }
-                if (fallback) {
-                    setTimeout(() => alert(`Server fallback (${fallback}). Displaying HTML instead.`), 250)
-                }
-            } else {
-                const blob = await res.blob()
-                const url = URL.createObjectURL(blob)
-                const a = document.createElement('a')
-                const safeBranchSlug = branchName(selectedBranch).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'branch'
-                a.download = `qc_report_${safeBranchSlug}_${dateRange.start}.${format}`
-                a.href = url
-                a.click()
-                URL.revokeObjectURL(url)
-            }
-        } catch (e: any) {
-            alert(e.message || 'Export failed')
-        } finally { setExporting(false) }
-    }
 
     // Google Doc export (stateless; charts images to be added later)
     const exportGoogleDoc = async () => {
@@ -622,7 +555,7 @@ export default function MedicalLabQADashboard() {
                             const canvas = await html2canvas(chartsSection, { backgroundColor: '#ffffff', scale: 1, useCORS: true })
                             const dataUrl = canvas.toDataURL('image/png')
                             if (dataUrl.startsWith('data:image/png;base64,')) {
-                                const base64 = dataUrl.substring('data:image/png;base64,'.length)
+                                const base64 = dataUrl.substring('data:image/png;base64.'.length)
                                 captures.push({ parameterId: 'all', name: 'All Parameters Combined', pngBase64: base64 })
                                 console.warn('[GDoc Export] Used section-level fallback capture')
                             }
@@ -876,6 +809,64 @@ export default function MedicalLabQADashboard() {
         return stats
     }, [recentProcessed, selectedBranch, dateRange.start, dateRange.end])
 
+    // --- Admin helpers & UI ---
+    const refreshBranches = async () => {
+        const b = await api.getBranches(); if (b.ok && Array.isArray(b.json?.items)) setBranches(b.json.items)
+    }
+    const refreshTechnicians = async () => {
+        if (!isAdmin) return; const r = await api.adminListTechnicians(); if (r.ok && Array.isArray(r.json?.items)) setTechnicians(r.json.items)
+    }
+    const handleBranchCreate = async (e: React.FormEvent) => { e.preventDefault(); if (!branchCreateName.trim()) return; const r = await api.adminCreateBranch(branchCreateName.trim()); if (r.ok) { setBranchCreateName(''); setAdminMessage('Branch created'); refreshBranches() } else setAdminMessage('Failed to create branch') }
+    const handleBranchUpdate = async (e: React.FormEvent) => { e.preventDefault(); if (!branchEdit) return; const r = await api.adminUpdateBranch(branchEdit.id, branchEdit.name.trim()); if (r.ok) { setAdminMessage('Branch updated'); setBranchEdit(null); refreshBranches() } else setAdminMessage('Failed to update branch') }
+    const handleBranchDelete = async (id: string) => { if (!confirm('Delete branch? This may fail if branch has data.')) return; const r = await api.adminDeleteBranch(id); if (r.ok) { setAdminMessage('Branch deleted'); refreshBranches() } else setAdminMessage(r.status === 409 ? 'Branch in use' : 'Delete failed') }
+    const handleTechCreate = async (e: React.FormEvent) => { e.preventDefault(); if (!techCreate.email || !techCreate.password) return; const r = await api.adminCreateTechnician(techCreate.email, techCreate.password, techCreate.branch_id || undefined); if (r.ok) { setTechCreate({ email: '', password: '', branch_id: '' }); setAdminMessage('Technician created'); refreshTechnicians() } else setAdminMessage('Failed to create technician') }
+    const handleTechUpdate = async (e: React.FormEvent) => { e.preventDefault(); if (!techEdit) return; const r = await api.adminUpdateTechnician(techEdit.id, { email: techEdit.email, branch_id: techEdit.branch_id || null }); if (r.ok) { setTechEdit(null); setAdminMessage('Technician updated'); refreshTechnicians() } else setAdminMessage('Update failed') }
+    const handleTechDelete = async (id: string) => { if (!confirm('Delete technician?')) return; const r = await api.adminDeleteTechnician(id); if (r.ok) { setAdminMessage('Technician deleted'); refreshTechnicians() } else setAdminMessage('Delete failed') }
+    const handlePwReset = async (e: React.FormEvent) => { e.preventDefault(); if (!pwReset) return; const r = await api.adminChangeTechnicianPassword(pwReset.id, pwReset.password); if (r.ok) { setPwReset(null); setAdminMessage('Password changed'); } else setAdminMessage('Password change failed') }
+
+    const renderAdmin = () => (
+        <div className="space-y-8">
+            <div className="bg-white rounded-lg shadow p-6">
+                <h2 className="text-xl font-semibold mb-4">Branch Management</h2>
+                <form onSubmit={handleBranchCreate} className="flex flex-col md:flex-row gap-2 mb-4">
+                    <input value={branchCreateName} onChange={e => setBranchCreateName(e.target.value)} placeholder="New branch name" className="border rounded px-3 py-2 flex-1" />
+                    <button className="bg-blue-600 text-white px-4 py-2 rounded">Add Branch</button>
+                </form>
+                {branchEdit && <form onSubmit={handleBranchUpdate} className="flex flex-col md:flex-row gap-2 mb-4 bg-blue-50 p-3 rounded">
+                    <input value={branchEdit.name} onChange={e => setBranchEdit({ ...branchEdit, name: e.target.value })} className="border rounded px-3 py-2 flex-1" />
+                    <div className="flex gap-2"><button className="bg-green-600 text-white px-4 py-2 rounded">Save</button><button type="button" onClick={() => setBranchEdit(null)} className="px-4 py-2 rounded border">Cancel</button></div>
+                </form>}
+                <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b"><th className="text-left py-2">Name</th><th className="text-left py-2">Actions</th></tr></thead><tbody>{branches.map(b => (<tr key={b.id} className="border-b"><td className="py-2">{b.name}</td><td className="py-2 flex gap-2"><button className="text-blue-600 hover:underline" onClick={() => setBranchEdit({ id: b.id, name: b.name })}>Rename</button><button className="text-red-600 hover:underline" onClick={() => handleBranchDelete(b.id)}>Delete</button></td></tr>))}</tbody></table></div>
+            </div>
+            <div className="bg-white rounded-lg shadow p-6">
+                <h2 className="text-xl font-semibold mb-4">Technician Management</h2>
+                <form onSubmit={handleTechCreate} className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-4">
+                    <input value={techCreate.email} onChange={e => setTechCreate(c => ({ ...c, email: e.target.value }))} placeholder="Email" className="border rounded px-3 py-2" />
+                    <input value={techCreate.password} onChange={e => setTechCreate(c => ({ ...c, password: e.target.value }))} placeholder="Password" type="password" className="border rounded px-3 py-2" />
+                    <select value={techCreate.branch_id} onChange={e => setTechCreate(c => ({ ...c, branch_id: e.target.value }))} className="border rounded px-3 py-2">
+                        <option value="">(No Branch)</option>
+                        {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                    <button className="bg-blue-600 text-white px-4 py-2 rounded">Add Technician</button>
+                </form>
+                {techEdit && <form onSubmit={handleTechUpdate} className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-4 bg-blue-50 p-3 rounded">
+                    <input value={techEdit.email} onChange={e => setTechEdit(t => t ? { ...t, email: e.target.value } : t)} className="border rounded px-3 py-2" />
+                    <select value={techEdit.branch_id} onChange={e => setTechEdit(t => t ? { ...t, branch_id: e.target.value } : t)} className="border rounded px-3 py-2">
+                        <option value="">(No Branch)</option>
+                        {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                    <div className="flex gap-2 col-span-1 md:col-span-2"><button className="bg-green-600 text-white px-4 py-2 rounded" type="submit">Save</button><button type="button" className="px-4 py-2 rounded border" onClick={() => setTechEdit(null)}>Cancel</button></div>
+                </form>}
+                {pwReset && <form onSubmit={handlePwReset} className="flex flex-col md:flex-row gap-2 mb-4 bg-amber-50 p-3 rounded">
+                    <input value={pwReset.password} onChange={e => setPwReset(p => p ? { ...p, password: e.target.value } : p)} placeholder="New password" type="password" className="border rounded px-3 py-2 flex-1" />
+                    <div className="flex gap-2"><button className="bg-purple-600 text-white px-4 py-2 rounded">Change</button><button type="button" onClick={() => setPwReset(null)} className="px-4 py-2 rounded border">Cancel</button></div>
+                </form>}
+                <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b"><th className="text-left py-2">Email</th><th className="text-left py-2">Branch</th><th className="text-left py-2">Created</th><th className="text-left py-2">Actions</th></tr></thead><tbody>{techLoading ? <tr><td colSpan={4} className="py-4 text-center text-gray-500">Loading…</td></tr> : technicians.map(t => (<tr key={t.id} className="border-b"><td className="py-2">{t.email}</td><td className="py-2">{branchName(t.branch_id || '') || '—'}</td><td className="py-2">{t.created_at?.split('T')[0] || ''}</td><td className="py-2 flex flex-wrap gap-2"><button className="text-blue-600 hover:underline" onClick={() => setTechEdit({ id: t.id, email: t.email, branch_id: t.branch_id || '' })}>Edit</button><button className="text-indigo-600 hover:underline" onClick={() => setPwReset({ id: t.id, password: '' })}>Password</button><button className="text-red-600 hover:underline" onClick={() => handleTechDelete(t.id)}>Delete</button></td></tr>))}</tbody></table></div>
+            </div>
+            {adminMessage && <div className="text-sm text-green-700 bg-green-50 border border-green-200 px-3 py-2 rounded">{adminMessage}</div>}
+        </div>
+    )
+
     const renderReports = () => {
         return (
             <div className="space-y-8" ref={reportRootRef} data-report-root>
@@ -993,21 +984,9 @@ export default function MedicalLabQADashboard() {
                         {!allParameterIdsForBranch.length && <div className="text-xs text-gray-500">No charts for selected period.</div>}
                     </div>
                 </div>
-                {/* Export Actions */}
+                {/* Export Actions (CSV + Google Doc only) */}
                 <div className="flex gap-3 justify-end">
                     <button onClick={exportReportCSV} disabled={exporting} className="px-4 py-2 text-xs rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50">CSV</button>
-                    <button onClick={() => backendExport('pdf')} disabled={exporting} className="px-4 py-2 text-xs rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2">
-                        {exporting && (<svg className="animate-spin h-3 w-3 text-white" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>)}
-                        <span>{exporting ? 'PDF…' : 'PDF'}</span>
-                    </button>
-                    <button onClick={() => backendExport('docx')} disabled={exporting} className="px-4 py-2 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2">
-                        {exporting && (<svg className="animate-spin h-3 w-3 text-white" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>)}
-                        <span>{exporting ? 'DOCX…' : 'DOCX'}</span>
-                    </button>
-                    <button onClick={() => backendExport('html')} disabled={exporting} className="px-4 py-2 text-xs rounded bg-gray-600 text-white hover:bg-gray-700 disabled:opacity-50 flex items-center gap-2">
-                        {exporting && (<svg className="animate-spin h-3 w-3 text-white" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>)}
-                        <span>{exporting ? 'HTML…' : 'HTML'}</span>
-                    </button>
                     <button onClick={exportGoogleDoc} disabled={gdocExporting} className="px-4 py-2 text-xs rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 flex items-center gap-2">
                         {gdocExporting && (<svg className="animate-spin h-3 w-3 text-white" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>)}
                         <span>{gdocExporting ? 'Google Doc…' : (googleReady ? 'Google Doc' : 'Connect Google')}</span>
@@ -1115,8 +1094,19 @@ export default function MedicalLabQADashboard() {
             {/* Tabs */}
             <div className="bg-white border-b">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                    <nav className="flex space-x-8 overflow-x-auto">{[{ id: 'dataEntry', name: 'Data Entry', icon: Plus, show: can.dataEntry }, { id: 'charts', name: 'Charts & Analysis', icon: BarChart3, show: can.charts }, { id: 'alerts', name: 'Alerts', icon: AlertTriangle, show: can.alerts }, { id: 'targets', name: 'Target Management', icon: Settings, show: can.targets }, { id: 'reports', name: 'Reports', icon: FileText, show: can.reports }].filter(t => t.show).map((tab: any) => (
-                        <button key={tab.id} onClick={() => setCurrentTab(tab.id)} className={`flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm ${currentTab === tab.id ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}>
+                    <nav className="flex space-x-8 overflow-x-auto">{[
+                        { id: 'dataEntry', name: 'Data Entry', icon: Plus, show: can.dataEntry },
+                        { id: 'charts', name: 'Charts & Analysis', icon: BarChart3, show: can.charts },
+                        { id: 'alerts', name: 'Alerts', icon: AlertTriangle, show: can.alerts },
+                        { id: 'targets', name: 'Target Management', icon: Settings, show: can.targets },
+                        { id: 'reports', name: 'Reports', icon: FileText, show: can.reports },
+                        { id: 'admin', name: 'Admin', icon: Settings, show: isAdmin },
+                    ].filter(t => t.show).map((tab: any) => (
+                        <button
+                            key={tab.id}
+                            onClick={() => setCurrentTab(tab.id)}
+                            className={`flex items-center gap-2 py-4 px-1 border-b-2 font-medium text-sm ${currentTab === tab.id ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+                        >
                             <tab.icon className="w-4 h-4" />{tab.name}
                             {tab.id === 'alerts' && alerts.filter(a => !a.acknowledged).length > 0 && (
                                 <span className="bg-red-500 text-white text-xs rounded-full px-2 py-1 min-w-[1.5rem] text-center">{alerts.filter(a => !a.acknowledged).length}</span>
@@ -1132,6 +1122,7 @@ export default function MedicalLabQADashboard() {
                 {currentTab === 'alerts' && can.alerts && renderAlerts()}
                 {currentTab === 'targets' && can.targets && renderTargets()}
                 {currentTab === 'reports' && can.reports && renderReports()}
+                {currentTab === 'admin' && isAdmin && renderAdmin()}
             </div>
             {/* Target Modal */}
             {showTargetModal && (

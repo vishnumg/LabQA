@@ -36,5 +36,15 @@ export const api = {
     },
     async createQc(entries: Array<{ date: string; parameter: string; branch: string; level: string; value: number; }>) {
         return this.fetchJSON('/api/qc', { method: 'POST', body: JSON.stringify({ entries }) })
-    }
+    },
+    // --- Admin: Branch Management ---
+    async adminCreateBranch(name: string) { return this.fetchJSON('/api/admin/branches', { method: 'POST', body: JSON.stringify({ name }) }) },
+    async adminUpdateBranch(id: string, name: string) { return this.fetchJSON(`/api/admin/branches/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }) },
+    async adminDeleteBranch(id: string) { return this.fetchJSON(`/api/admin/branches/${id}`, { method: 'DELETE' }) },
+    // --- Admin: Technician Management ---
+    async adminListTechnicians() { return this.fetchJSON('/api/admin/technicians') },
+    async adminCreateTechnician(email: string, password: string, branch_id?: string | null) { return this.fetchJSON('/api/admin/technicians', { method: 'POST', body: JSON.stringify({ email, password, branch_id }) }) },
+    async adminUpdateTechnician(id: string, data: { email?: string; branch_id?: string | null }) { return this.fetchJSON(`/api/admin/technicians/${id}`, { method: 'PUT', body: JSON.stringify(data) }) },
+    async adminDeleteTechnician(id: string) { return this.fetchJSON(`/api/admin/technicians/${id}`, { method: 'DELETE' }) },
+    async adminChangeTechnicianPassword(id: string, password: string) { return this.fetchJSON(`/api/admin/technicians/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) }) }
 }

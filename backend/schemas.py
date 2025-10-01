@@ -25,6 +25,14 @@ class BranchOut(BaseModel):
 class BranchList(BaseModel):
     items: List[BranchOut]
 
+
+class BranchCreate(BaseModel):
+    name: str
+
+
+class BranchUpdate(BaseModel):
+    name: str
+
 # Parameters
 
 
@@ -106,3 +114,31 @@ class QcBulkCreate(BaseModel):
 
 class QcBulkResponse(BaseModel):
     inserted: int
+
+# Users / Technicians (admin management)
+
+
+class TechnicianOut(BaseModel):
+    id: str
+    email: str
+    branch_id: Optional[str] = None
+    created_at: datetime
+
+
+class TechnicianList(BaseModel):
+    items: List[TechnicianOut]
+
+
+class TechnicianCreate(BaseModel):
+    email: str
+    password: str
+    branch_id: Optional[str] = None
+
+
+class TechnicianUpdate(BaseModel):
+    email: Optional[str] = None
+    branch_id: Optional[str] = None
+
+
+class PasswordChange(BaseModel):
+    password: str
