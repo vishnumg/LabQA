@@ -611,6 +611,7 @@ class ReportExportRequest(schemas.BaseModel):  # type: ignore
     parameters: list[ReportParameterStats]
     format: Optional[str] = None  # optional; if provided must be 'gdoc'
     chartImages: list[dict] | None = None  # provided by frontend for gdoc export
+    ruleViolations: list[dict] | None = None  # Westgard rule violations
 
 # ---------------------------------------------------------------------------
 # Google OAuth (stateless) endpoints
@@ -807,6 +808,7 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
             fmt_num(s.get('sd'), 3),
             fmt_num(s.get('cv'), 1),
         ])
+    # Build text sections
     lines: list[str] = [
         title_line,
         '',
@@ -819,14 +821,26 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
         lines.append('NARRATIVE:')
         lines.extend((payload.narrative or '').split('\n'))
         lines.append('')
+
+    # Build complete text with placeholders for tables
+    violations_placeholder = 'VIOLATIONS_TABLE_HERE'
+    stats_placeholder = 'STATS_TABLE_HERE'
+    has_violations = payload.ruleViolations and len(payload.ruleViolations) > 0
+
+    if has_violations:
+        lines.append('WESTGARD RULE VIOLATIONS:')
+        lines.append(violations_placeholder)
+        lines.append('')
+    elif payload.ruleViolations is not None:
+        lines.append('WESTGARD RULE VIOLATIONS:')
+        lines.append('✓ No violations detected - all QC results within acceptable limits')
+        lines.append('')
+
     lines.append('PARAMETER STATISTICS:')
-    lines.append('[[STATS_TABLE]]')
+    lines.append(stats_placeholder)
     lines.append('')
-    lines.append('[[CHARTS_SECTION]]')
+
     base_text = '\n'.join(lines) + '\n'
-    initial_req_body = json.dumps({'requests': [
-        {'insertText': {'location': {'index': 1}, 'text': base_text}}
-    ]}).encode()
 
     def _docs_batch(request_body: bytes):
         _r = urllib.request.Request(
@@ -835,11 +849,19 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
         _r.add_header('Content-Type', 'application/json')
         with urllib.request.urlopen(_r, timeout=60) as _resp:  # nosec B310
             _resp.read()
+
+    # Insert initial text with placeholders
+    initial_requests: list[dict] = [
+        {'insertText': {'location': {'index': 1}, 'text': base_text}}
+    ]
+
+    # Execute initial batch
     try:
-        _docs_batch(initial_req_body)
+        _docs_batch(json.dumps({'requests': initial_requests}).encode())
     except Exception as e:
         raise HTTPException(status_code=502, detail=f'doc_update_failed_initial:{type(e).__name__}')
-    # Fetch document to locate placeholder indices
+
+    # Fetch document to find placeholder positions
     try:
         get_req = urllib.request.Request(
             f'https://docs.googleapis.com/v1/documents/{document_id}', method='GET')
@@ -848,49 +870,136 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
             doc_state = json.loads(gres.read().decode())
     except Exception:
         raise HTTPException(status_code=502, detail='doc_fetch_failed')
+
     content = doc_state.get('body', {}).get('content', [])
 
-    def find_marker(marker: str) -> int | None:
+    def find_placeholder(placeholder_text: str) -> int | None:
+        # Search through all content elements
         for el in content:
-            for p in el.get('paragraph', {}).get('elements', []):
-                text_run = p.get('textRun', {})
-                text = text_run.get('content', '')
-                idx = text.find(marker)
-                if idx >= 0:
-                    para_start = el.get('startIndex')
-                    return (para_start or 1) + idx
+            if 'paragraph' not in el:
+                continue
+
+            para_start = el.get('startIndex', 1)
+            elements = el.get('paragraph', {}).get('elements', [])
+
+            # Build complete paragraph text
+            full_text = ''
+            for elem in elements:
+                text_run = elem.get('textRun', {})
+                full_text += text_run.get('content', '')
+
+            # Search for placeholder in complete paragraph text
+            if placeholder_text in full_text:
+                offset = full_text.find(placeholder_text)
+                return para_start + offset
+
         return None
 
-    stats_marker_index = find_marker('[[STATS_TABLE]]')
-    charts_marker_index = find_marker('[[CHARTS_SECTION]]')
-    requests: list[dict] = []
-    if stats_marker_index is not None:
-        requests.append({'deleteContentRange': {'range': {
-            'startIndex': stats_marker_index, 'endIndex': stats_marker_index + len('[[STATS_TABLE]]')}}})
+    # Find placeholder positions
+    violations_table_index = find_placeholder(violations_placeholder) if has_violations else None
+    stats_table_index = find_placeholder(stats_placeholder)
+
+    # Debug logging
+    print(f"[DEBUG] Searching for placeholders:")
+    print(
+        f"  violations_placeholder: '{violations_placeholder}' -> index: {violations_table_index}")
+    print(f"  stats_placeholder: '{stats_placeholder}' -> index: {stats_table_index}")
+    print(f"  has_violations: {has_violations}")
+
+    # Validate that we found the required placeholders
+    if stats_table_index is None:
+        # Log document content for debugging
+        print(f"[DEBUG] Document content elements count: {len(content)}")
+        for i, el in enumerate(content[:5]):  # First 5 elements
+            if 'paragraph' in el:
+                para_text = ''
+                for elem in el.get('paragraph', {}).get('elements', []):
+                    para_text += elem.get('textRun', {}).get('content', '')
+                print(f"[DEBUG] Element {i}: {para_text[:100]}")
+        raise HTTPException(status_code=500, detail=f'stats_placeholder_not_found')
+    if has_violations and violations_table_index is None:
+        raise HTTPException(status_code=500, detail=f'violations_placeholder_not_found')
+
+    # Replace placeholders with tables
+    # Process in reverse order (stats first if it comes after violations) to avoid index shifting issues
+    replace_requests: list[dict] = []
+
+    # Determine order based on positions
+    tables_to_insert = []
+
+    if violations_table_index is not None:
+        violations_rows = len(payload.ruleViolations or []) + 1
+        violations_cols = 6
+        tables_to_insert.append({
+            'index': violations_table_index,
+            'placeholder_len': len(violations_placeholder),
+            'rows': violations_rows,
+            'cols': violations_cols,
+            'type': 'violations'
+        })
+
+    if stats_table_index is not None:
         rows = len(stats_rows) + 1
         cols = len(table_header)
-        requests.append({'insertTable': {'rows': rows, 'columns': cols,
-                                         'location': {'index': stats_marker_index}}})
-    if requests:
+        tables_to_insert.append({
+            'index': stats_table_index,
+            'placeholder_len': len(stats_placeholder),
+            'rows': rows,
+            'cols': cols,
+            'type': 'stats'
+        })
+
+    # Sort by index descending so we process from end to start (avoids index shifting)
+    tables_to_insert.sort(key=lambda x: x['index'], reverse=True)
+
+    for table_info in tables_to_insert:
+        # Delete placeholder
+        replace_requests.append({
+            'deleteContentRange': {
+                'range': {
+                    'startIndex': table_info['index'],
+                    'endIndex': table_info['index'] + table_info['placeholder_len']
+                }
+            }
+        })
+        # Insert table at same position
+        replace_requests.append({
+            'insertTable': {
+                'rows': table_info['rows'],
+                'columns': table_info['cols'],
+                'location': {'index': table_info['index']}
+            }
+        })
+
+    if replace_requests:
+        print(f"[DEBUG] Executing {len(replace_requests)} replace requests")
+        print(f"[DEBUG] Replace requests: {json.dumps(replace_requests, indent=2)}")
         try:
-            _docs_batch(json.dumps({'requests': requests}).encode())
-        except Exception:
-            pass
-    if stats_marker_index is not None:
-        try:
-            get_req = urllib.request.Request(
-                f'https://docs.googleapis.com/v1/documents/{document_id}', method='GET')
-            get_req.add_header('Authorization', f'Bearer {access_token}')
-            with urllib.request.urlopen(get_req, timeout=30) as gres:  # nosec B310
-                doc_state = json.loads(gres.read().decode())
-        except Exception:
-            doc_state = None
-    if stats_marker_index is not None and doc_state:
+            _docs_batch(json.dumps({'requests': replace_requests}).encode())
+            print("[DEBUG] Replace batch succeeded")
+        except Exception as e:
+            # Log the actual error instead of silently continuing
+            print(f"[ERROR] Table replacement failed: {type(e).__name__}: {str(e)}")
+            raise HTTPException(
+                status_code=502, detail=f'table_replacement_failed:{type(e).__name__}')
+
+    # Refetch document to get table structures
+    try:
+        get_req = urllib.request.Request(
+            f'https://docs.googleapis.com/v1/documents/{document_id}', method='GET')
+        get_req.add_header('Authorization', f'Bearer {access_token}')
+        with urllib.request.urlopen(get_req, timeout=30) as gres:  # nosec B310
+            doc_state = json.loads(gres.read().decode())
+    except Exception:
+        doc_state = None
+
+    # Populate stats table
+    if stats_table_index is not None and doc_state:
         table_index = None
         for _poll in range(12):
             body_content = doc_state.get('body', {}).get('content', [])
             for el in body_content:
-                if el.get('startIndex') and el.get('startIndex') >= stats_marker_index and 'table' in el:
+                if el.get('startIndex') and el.get('startIndex') >= stats_table_index and 'table' in el:
                     table_index = el
                     break
             if table_index:
@@ -961,10 +1070,165 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                                 'range': {'startIndex': start, 'endIndex': end}, 'textStyle': {'bold': True}, 'fields': 'bold'}})
                     if style_reqs:
                         _docs_batch(json.dumps({'requests': style_reqs}).encode())
+
+                    # Set column widths for stats table (in points: 1 inch = 72 points)
+                    # Stats table columns: Parameter/Level (wider), n, Mean, SD, CV%
+                    stats_col_widths = [200, 50, 80, 80, 70]  # in points
+                    width_reqs = []
+                    for ci, width_pt in enumerate(stats_col_widths):
+                        width_reqs.append({
+                            'updateTableColumnProperties': {
+                                'tableStartLocation': {'index': table_index.get('startIndex')},
+                                'columnIndices': [ci],
+                                'tableColumnProperties': {
+                                    'widthType': 'FIXED_WIDTH',
+                                    'width': {'magnitude': width_pt, 'unit': 'PT'}
+                                },
+                                'fields': 'widthType,width'
+                            }
+                        })
+                    if width_reqs:
+                        _docs_batch(json.dumps({'requests': width_reqs}).encode())
                 except Exception:
                     pass
             except Exception:
                 pass
+
+    # Populate violations table if it exists
+    if violations_table_index is not None and payload.ruleViolations and len(payload.ruleViolations) > 0:
+        try:
+            get_req = urllib.request.Request(
+                f'https://docs.googleapis.com/v1/documents/{document_id}', method='GET')
+            get_req.add_header('Authorization', f'Bearer {access_token}')
+            with urllib.request.urlopen(get_req, timeout=30) as gres:  # nosec B310
+                violations_doc_state = json.loads(gres.read().decode())
+        except Exception:
+            violations_doc_state = None
+
+        if violations_doc_state:
+            violations_table_elem = None
+            violations_headers = ['Date', 'Parameter', 'Level', 'Rule', 'Description', 'Severity']
+            violations_expected_rows = len(payload.ruleViolations) + 1
+
+            # Poll for table with proper structure (similar to stats table)
+            for _poll in range(12):
+                body_content = violations_doc_state.get('body', {}).get('content', [])
+                for el in body_content:
+                    if el.get('startIndex') and el.get('startIndex') >= violations_table_index and 'table' in el:
+                        violations_table_elem = el
+                        break
+                if violations_table_elem:
+                    tbl = violations_table_elem.get('table') or {}
+                    rows_list = tbl.get('tableRows') or []
+                    rows_ok = len(rows_list) == violations_expected_rows
+                    shape_ok = rows_ok and all(len(r.get('tableCells', [])) == 6 for r in rows_list)
+                    if shape_ok:
+                        flat_cells = [c for r in rows_list for c in r.get('tableCells', [])]
+                        uniq = {c.get('startIndex')
+                                for c in flat_cells if c.get('startIndex') is not None}
+                        if flat_cells and len(uniq) >= len(flat_cells) * 0.9:
+                            break
+                violations_table_elem = None
+                try:
+                    time.sleep(0.25)
+                    get_req = urllib.request.Request(
+                        f'https://docs.googleapis.com/v1/documents/{document_id}', method='GET')
+                    get_req.add_header('Authorization', f'Bearer {access_token}')
+                    with urllib.request.urlopen(get_req, timeout=30) as gres:  # nosec B310
+                        violations_doc_state = json.loads(gres.read().decode())
+                except Exception:
+                    break
+
+            if violations_table_elem:
+                def _refetch_violations_table():
+                    try:
+                        r = urllib.request.Request(
+                            f'https://docs.googleapis.com/v1/documents/{document_id}', method='GET')
+                        r.add_header('Authorization', f'Bearer {access_token}')
+                        with urllib.request.urlopen(r, timeout=30) as rr:  # nosec B310
+                            fresh = json.loads(rr.read().decode())
+                        for el in fresh.get('body', {}).get('content', []):
+                            if el.get('startIndex') == violations_table_elem.get('startIndex') and 'table' in el:
+                                return el.get('table')
+                    except Exception:
+                        return violations_table_elem.get('table')
+                    return violations_table_elem.get('table')
+
+                violations_table = _refetch_violations_table()
+                violations_headers = ['Date', 'Parameter',
+                                      'Level', 'Rule', 'Description', 'Severity']
+                try:
+                    insert_cells: list[tuple[int, str]] = []
+                    # Insert headers
+                    for ci, header in enumerate(violations_headers):
+                        cell = violations_table['tableRows'][0]['tableCells'][ci]
+                        insert_cells.append((cell['startIndex'] + 1, header))
+
+                    # Insert data rows
+                    for ri, violation in enumerate(payload.ruleViolations, start=1):
+                        row_vals = [
+                            violation.get('date', ''),
+                            violation.get('parameter', ''),
+                            violation.get('level', ''),
+                            violation.get('rule', ''),
+                            violation.get('description', ''),
+                            violation.get('severity', '')
+                        ]
+                        for ci, val in enumerate(row_vals):
+                            try:
+                                cell = violations_table['tableRows'][ri]['tableCells'][ci]
+                                insert_cells.append((cell['startIndex'] + 1, str(val)))
+                            except Exception:
+                                continue
+
+                    insert_cells.sort(key=lambda x: x[0], reverse=True)
+                    BATCH = 10
+                    for i in range(0, len(insert_cells), BATCH):
+                        chunk = insert_cells[i:i+BATCH]
+                        reqs = [{'insertText': {'location': {'index': idx}, 'text': text}}
+                                for idx, text in chunk]
+                        _docs_batch(json.dumps({'requests': reqs}).encode())
+
+                    # Style headers as bold
+                    violations_table = _refetch_violations_table()
+                    try:
+                        header_cells = violations_table['tableRows'][0]['tableCells']
+                        style_reqs = []
+                        for ci in range(len(violations_headers)):
+                            c = header_cells[ci]
+                            start = c['startIndex'] + 1
+                            end = c['endIndex'] - 1
+                            if end > start:
+                                style_reqs.append({'updateTextStyle': {
+                                    'range': {'startIndex': start, 'endIndex': end}, 'textStyle': {'bold': True}, 'fields': 'bold'}})
+                        if style_reqs:
+                            _docs_batch(json.dumps({'requests': style_reqs}).encode())
+
+                        # Set column widths for violations table
+                        # Ruler positions: 0, 0.94, 2.34, 2.93, 3.59, 5.76, 6.51 inches
+                        # Columns: Date, Parameter, Level, Rule, Description, Severity
+                        # in points (1 inch = 72 points)
+                        violations_col_widths = [68, 101, 42, 48, 156, 54]
+                        width_reqs = []
+                        for ci, width_pt in enumerate(violations_col_widths):
+                            width_reqs.append({
+                                'updateTableColumnProperties': {
+                                    'tableStartLocation': {'index': violations_table_elem.get('startIndex')},
+                                    'columnIndices': [ci],
+                                    'tableColumnProperties': {
+                                        'widthType': 'FIXED_WIDTH',
+                                        'width': {'magnitude': width_pt, 'unit': 'PT'}
+                                    },
+                                    'fields': 'widthType,width'
+                                }
+                            })
+                        if width_reqs:
+                            _docs_batch(json.dumps({'requests': width_reqs}).encode())
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
     try:
         get_req = urllib.request.Request(
             f'https://docs.googleapis.com/v1/documents/{document_id}', method='GET')
@@ -996,6 +1260,12 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                     'fields': 'namedStyleType'
                 }})
             elif full_para == 'NARRATIVE:':
+                paragraph_style_requests.append({'updateParagraphStyle': {
+                    'range': {'startIndex': start_i, 'endIndex': end_i - 1},
+                    'paragraphStyle': {'namedStyleType': 'HEADING_2'},
+                    'fields': 'namedStyleType'
+                }})
+            elif full_para == 'WESTGARD RULE VIOLATIONS:':
                 paragraph_style_requests.append({'updateParagraphStyle': {
                     'range': {'startIndex': start_i, 'endIndex': end_i - 1},
                     'paragraphStyle': {'namedStyleType': 'HEADING_2'},

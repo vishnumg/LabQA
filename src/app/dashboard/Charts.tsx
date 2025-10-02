@@ -57,7 +57,7 @@ export default function Charts({ selectedBranch, selectedParameter, branches, pa
                     <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={data} margin={{ top: 10, left: 4, right: 4, bottom: 0 }}>
                             <CartesianGrid stroke="#eee" strokeDasharray="4 4" />
-                            <XAxis dataKey="date" tick={{ fontSize: 10 }} minTickGap={20} />
+                            <XAxis dataKey="date" tick={{ fontSize: 10 }} interval={0} angle={-45} textAnchor="end" height={60} />
                             <YAxis tick={{ fontSize: 10 }} domain={['auto', 'auto']} />
                             <Tooltip formatter={(val: any, _name, ctx) => [fmt(val), ctx?.payload?.zScore != null ? `Value (Z=${fmt(ctx.payload.zScore)})` : 'Value']} />
                             {mean != null && <ReferenceLine y={mean} stroke="#2563eb" strokeWidth={2} />}
@@ -118,7 +118,7 @@ export default function Charts({ selectedBranch, selectedParameter, branches, pa
     }
     const onWheel = (e: React.WheelEvent) => {
         if (!combinedData.length) return
-        e.preventDefault()
+        // Note: Cannot preventDefault on passive wheel events in modern browsers
         const delta = e.deltaY
         const span = windowIdx.end - windowIdx.start + 1
         const center = windowIdx.start + span / 2
@@ -268,7 +268,7 @@ export default function Charts({ selectedBranch, selectedParameter, branches, pa
                     <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={viewData} margin={{ top: 10, left: 4, right: 8, bottom: 0 }}>
                             <CartesianGrid stroke="#eee" strokeDasharray="4 4" />
-                            <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={20} />
+                            <XAxis dataKey="date" tick={{ fontSize: 11 }} interval={0} angle={-45} textAnchor="end" height={60} />
                             <YAxis tick={{ fontSize: 11 }} domain={[-4, 4]} />
                             <Tooltip formatter={(val: any, name: string) => [fmt(val), `${name} Z`]} />
                             <Legend content={customLegend} />

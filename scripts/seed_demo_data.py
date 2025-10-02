@@ -1,4 +1,4 @@
-from sqlalchemy import desc  # may be unused after change; kept if needed
+from sqlalchemy import desc, text  # may be unused after change; kept if needed
 from sqlmodel import select, Session
 import bcrypt
 from dotenv import load_dotenv
@@ -94,61 +94,65 @@ def gen_value(mean: float, sd: float, z: float | None = None) -> float:
 
 def seed_month_qc(session: Session, branch_ids: list[uuid.UUID], start_date: dt.date, days: int, mid_update_date: dt.date):
     # Generate QC entries across parameters/levels for each day and branch.
+    # Stagger levels: L1 on day 0,3,6..., L2 on day 1,4,7..., L3 on day 2,5,8...
     # Insert specific patterns for alerts around some dates.
     random.seed(42)
     for d in range(days):
         day = start_date + dt.timedelta(days=d)
         day_str = day.isoformat()
+        # Determine which level to generate based on day modulo 3
+        level_index = d % 3
+        level = ["L1", "L2", "L3"][level_index]
+
         for bid in branch_ids:
             for p in PARAMETERS:
-                for level in ("L1", "L2", "L3"):
-                    # Effective target is the latest with valid_from <= day
-                    t = session.exec(
-                        select(Target)
-                        .where(
-                            Target.branch_id == bid,
-                            Target.parameter_id == p["id"],
-                            Target.level == level,
-                            Target.valid_from <= day,
-                        )
-                        .order_by(Target.valid_from.desc())  # type: ignore[attr-defined]
-                    ).first()
-                    if t:
-                        mean, sd = (t.mean, t.sd)
-                    else:
-                        mean, sd = default_target_for(p["id"], level)
-                    z = None
-                    # Inject scenarios:
-                    # - 1_3s: single >3SD on day 5 for cholesterol L1 (XYZ)
-                    if p["id"] == "cholesterol" and level == "L1" and d == 5 and bid == branch_ids[1]:
-                        z = 3.2
-                    # - 2_2s: two consecutive >2SD (same side) for glucose L2 (ABC) on days 10-11
-                    if p["id"] == "glucose" and level == "L2" and d in (10, 11) and bid == branch_ids[0]:
-                        z = 2.3
-                    # - R_4s: consecutive range >=4SD for triglycerides L3 (ABC) day 15 big low, day 16 big high
-                    if p["id"] == "triglycerides" and level == "L3" and bid == branch_ids[0]:
-                        if d == 15:
-                            z = -2.2
-                        if d == 16:
-                            z = 2.2
-                    # - 4_1s: four consecutive >1SD same side for HbA1c L1 (XYZ) days 20-23
-                    if p["id"] == "hba1c" and level == "L1" and bid == branch_ids[1] and 20 <= d <= 23:
-                        z = 1.3
-                    # - 10_x: ten consecutive on same side for glucose L1 (ABC) days 0-9
-                    if p["id"] == "glucose" and level == "L1" and bid == branch_ids[0] and 0 <= d <= 9:
-                        z = 0.6
-                    # - Normal days: mild noise
-                    value = gen_value(mean, sd, z)
-                    session.add(QcEntry(
-                        id=uuid.uuid4(),
-                        date=day,
-                        parameter=p["id"],
-                        branch=bid,
-                        level=level,
-                        value=round(value, 2),
-                        entered_by="seed",
-                        entered_at=dt.datetime.utcnow(),
-                    ))
+                # Effective target is the latest with valid_from <= day
+                t = session.exec(
+                    select(Target)
+                    .where(
+                        Target.branch_id == bid,
+                        Target.parameter_id == p["id"],
+                        Target.level == level,
+                        Target.valid_from <= day,
+                    )
+                    .order_by(Target.valid_from.desc())  # type: ignore[attr-defined]
+                ).first()
+                if t:
+                    mean, sd = (t.mean, t.sd)
+                else:
+                    mean, sd = default_target_for(p["id"], level)
+                z = None
+                # Inject scenarios (adjusted for staggered days):
+                # - 1_3s: single >3SD on day 15 (L1) for cholesterol L1 (XYZ)
+                if p["id"] == "cholesterol" and level == "L1" and d == 15 and bid == branch_ids[1]:
+                    z = 3.2
+                # - 2_2s: two consecutive >2SD (same side) for glucose L2 (ABC) on days 10,13 (L2 days)
+                if p["id"] == "glucose" and level == "L2" and d in (10, 13) and bid == branch_ids[0]:
+                    z = 2.3
+                # - R_4s: consecutive range >=4SD for triglycerides L3 (ABC) day 14,17 (L3 days)
+                if p["id"] == "triglycerides" and level == "L3" and bid == branch_ids[0]:
+                    if d == 14:
+                        z = -2.2
+                    if d == 17:
+                        z = 2.2
+                # - 4_1s: four consecutive >1SD same side for HbA1c L1 (XYZ) days 18,21,24,27 (L1 days)
+                if p["id"] == "hba1c" and level == "L1" and bid == branch_ids[1] and d in (18, 21, 24, 27):
+                    z = 1.3
+                # - 10_x: ten consecutive on same side for glucose L1 (ABC) days 0,3,6,9,12,15,18,21,24,27 (first 10 L1 days)
+                if p["id"] == "glucose" and level == "L1" and bid == branch_ids[0] and d in (0, 3, 6, 9, 12, 15, 18, 21, 24, 27):
+                    z = 0.6
+                # - Normal days: mild noise
+                value = gen_value(mean, sd, z)
+                session.add(QcEntry(
+                    id=uuid.uuid4(),
+                    date=day,
+                    parameter=p["id"],
+                    branch=bid,
+                    level=level,
+                    value=round(value, 2),
+                    entered_by="seed",
+                    entered_at=dt.datetime.utcnow(),
+                ))
 
         # On mid_update_date, after inserting that day's rows, add a versioned target for ABC branch (branch_ids[0])
         if day == mid_update_date:
@@ -195,6 +199,16 @@ def main():
     # Expect migrations already applied externally
     engine = db.get_engine()
     with Session(engine) as session:  # type: ignore
+        # Truncate tables before seeding (in correct order to respect foreign keys)
+        print("Truncating existing data...")
+        session.connection().execute(text("TRUNCATE TABLE qc_entries CASCADE"))
+        session.connection().execute(text("TRUNCATE TABLE targets CASCADE"))
+        session.connection().execute(text("TRUNCATE TABLE users CASCADE"))
+        session.connection().execute(text("TRUNCATE TABLE branches CASCADE"))
+        session.connection().execute(text("TRUNCATE TABLE parameters CASCADE"))
+        session.commit()
+        print("Tables truncated.")
+
         # Upsert parameters first
         for p in PARAMETERS:
             if not session.get(Parameter, p["id"]):
@@ -203,6 +217,10 @@ def main():
 
         abc_id = upsert_branch(session, "ABC Lab - Pattom")
         xyz_id = upsert_branch(session, "XYZ Lab - Ulloor")
+
+        # Create admin user (no branch association)
+        upsert_user(session, "admin@labqa.in", os.getenv("ADMIN_PASSWORD",
+                    "ChangeMe123!"), "admin", None)
 
         upsert_user(session, "tech@abc.in", os.getenv("TECH_ABC_PASSWORD",
                     "ChangeMe123!"), "technician", abc_id)
@@ -217,7 +235,10 @@ def main():
 
         print("Demo data seeded:")
         print("  Branches:", str(abc_id), str(xyz_id))
-        print("  Users: tech@abc.in, tech@xyz.in (password: ChangeMe123!)")
+        print("  Users:")
+        print("    - admin@labqa.in (role: admin, password: ChangeMe123!)")
+        print("    - tech@abc.in (role: technician, password: ChangeMe123!)")
+        print("    - tech@xyz.in (role: technician, password: ChangeMe123!)")
         print("  QC: 30 days with alert scenarios & versioned targets")
 
 
