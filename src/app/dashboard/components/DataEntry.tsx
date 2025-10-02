@@ -50,6 +50,8 @@ export default function DataEntry({
     const [editingId, setEditingId] = useState<string | null>(null)
     const [editValue, setEditValue] = useState<string>('')
     const [isDeleting, setIsDeleting] = useState<string | null>(null)
+    const [submitError, setSubmitError] = useState<string | null>(null)
+    const [isSubmitting, setIsSubmitting] = useState(false)
 
     const handleStartEdit = (entry: QcEntry & { zScore: number | null }) => {
         setEditingId(String(entry.id))
@@ -113,25 +115,33 @@ export default function DataEntry({
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
+        setSubmitError(null)
+        setIsSubmitting(true)
 
-        const entries: QcEntry[] = []
-            ; (['l1', 'l2', 'l3'] as const).forEach(l => {
-                const v = (entryForm as any)[l]
-                if (v) {
-                    entries.push({
-                        id: Date.now() + Math.random(),
-                        date: entryForm.date,
-                        parameter: entryForm.parameter,
-                        branch: entryForm.branch,
-                        level: l.toUpperCase() as any,
-                        value: parseFloat(v),
-                        enteredBy: 'Current User',
-                        enteredAt: new Date().toISOString()
-                    })
-                }
-            })
+        try {
+            const entries: QcEntry[] = []
+                ; (['l1', 'l2', 'l3'] as const).forEach(l => {
+                    const v = (entryForm as any)[l]
+                    if (v) {
+                        entries.push({
+                            id: Date.now() + Math.random(),
+                            date: entryForm.date,
+                            parameter: entryForm.parameter,
+                            branch: entryForm.branch,
+                            level: l.toUpperCase() as any,
+                            value: parseFloat(v),
+                            enteredBy: 'Current User',
+                            enteredAt: new Date().toISOString()
+                        })
+                    }
+                })
 
-        if (entries.length) {
+            if (entries.length === 0) {
+                setSubmitError('Please enter at least one value (L1, L2, or L3)')
+                setIsSubmitting(false)
+                return
+            }
+
             const res = await api.createQc(entries.map(e => ({
                 date: e.date,
                 parameter: e.parameter,
@@ -167,7 +177,15 @@ export default function DataEntry({
                 if (r2.ok && Array.isArray(r2.json?.items)) {
                     setRecentQcData(r2.json.items as any)
                 }
+            } else {
+                // Handle error response
+                const errorDetail = res.json?.detail || 'Failed to create QC entry'
+                setSubmitError(errorDetail)
             }
+        } catch (err: any) {
+            setSubmitError(err.message || 'An unexpected error occurred')
+        } finally {
+            setIsSubmitting(false)
         }
     }
 
@@ -179,6 +197,26 @@ export default function DataEntry({
                     QC Data Entry
                 </h2>
                 <form onSubmit={handleSubmit} className="space-y-4">
+                    {submitError && (
+                        <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg flex items-start gap-2">
+                            <div className="flex-shrink-0 mt-0.5">
+                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                                </svg>
+                            </div>
+                            <div className="flex-1">
+                                <p className="font-medium">Error</p>
+                                <p className="text-sm">{submitError}</p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setSubmitError(null)}
+                                className="flex-shrink-0 text-red-600 hover:text-red-800"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+                    )}
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
                             <label className="block text-sm font-medium mb-1">Date</label>
@@ -232,9 +270,16 @@ export default function DataEntry({
                         ))}
                     </div>
                     <div className="flex gap-2">
-                        <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 flex items-center gap-2">
+                        <button
+                            type="submit"
+                            disabled={isSubmitting}
+                            className={`px-4 py-2 rounded flex items-center gap-2 ${isSubmitting
+                                    ? 'bg-gray-400 cursor-not-allowed'
+                                    : 'bg-blue-600 hover:bg-blue-700'
+                                } text-white`}
+                        >
                             <Save className="w-4 h-4" />
-                            Save Entry
+                            {isSubmitting ? 'Saving...' : 'Save Entry'}
                         </button>
                     </div>
                 </form>
