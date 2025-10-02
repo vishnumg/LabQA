@@ -42,6 +42,17 @@ class ParameterOut(BaseModel):
     unit: Optional[str] = None
 
 
+class ParameterCreate(BaseModel):
+    id: str  # e.g., "glucose", "hba1c"
+    name: str  # e.g., "Glucose", "HbA1c"
+    unit: Optional[str] = None  # e.g., "mg/dL", "%"
+
+
+class ParameterUpdate(BaseModel):
+    name: Optional[str] = None
+    unit: Optional[str] = None
+
+
 class ParameterList(BaseModel):
     items: List[ParameterOut]
 
@@ -105,6 +116,11 @@ class QcEntryIn(BaseModel):
     parameter: str
     branch: str
     level: str
+    value: float
+
+
+class QcEntryUpdate(BaseModel):
+    """Update schema for QC entry - only value can be changed"""
     value: float
 
 

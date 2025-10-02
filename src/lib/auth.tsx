@@ -1,7 +1,7 @@
 "use client"
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 
-export type Claims = { sub: string; role?: string; branch_id?: string; exp?: number }
+export type Claims = { sub: string; email?: string; role?: string; branch_id?: string; exp?: number }
 
 type AuthContextType = { token: string | null; claims: Claims | null; setToken: (t: string | null) => void; logout: () => void; ready: boolean }
 

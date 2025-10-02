@@ -2,41 +2,28 @@
 // Migrated full dashboard implementation from former frontend directory.
 // (Enhancement) Technician defaults: auto lock branch & ensure first parameter selected after data loads.
 import { useEffect, useMemo, useState, useRef } from 'react'
-import { BarChart3, AlertTriangle, Settings, FileText, Plus, Save, X, Calendar, Download } from 'lucide-react'
-import { ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis, ReferenceLine, Tooltip } from 'recharts'
-import { startGoogleOAuth, initOAuthMessageListener, ensureGoogleAccessToken, loadTokens } from '../../lib/googleAuth'
+import { BarChart3, AlertTriangle, Settings, FileText, Calendar, X, Plus } from 'lucide-react'
+import { initOAuthMessageListener, loadTokens, ensureGoogleAccessToken, startGoogleOAuth } from '../../lib/googleAuth'
 import dynamic from 'next/dynamic'
 import { useAuth } from '../../lib/auth'
 import { api } from '../../lib/api'
 
+// Extracted modules
+import type { QcEntry, TargetVersion, Alert, Branch, Parameter, Technician, LabDetails, EntryForm, TargetForm, DateRange, TabType } from './types'
+import { formatDateDisplay, formatDateTimeDisplay, effectiveTarget, calculateZ, evaluateRules, calculateObservedStats, getEffectiveTargetMap } from './utils'
+import { useBranches, useParameters, useTargets, useQcData, useRecentQcData, useTechnicians } from './hooks'
+import DataEntry from './components/DataEntry'
+import AlertsView from './components/AlertsView'
+import ReportsView from './components/ReportsView'
+import AdminView from './components/AdminView'
+import TargetsView from './components/TargetsView'
+import TargetModal from './components/TargetModal'
+import DeleteConfirmationModal, { type DeleteOption } from './components/DeleteConfirmationModal'
+
 const Charts = dynamic(() => import('./Charts'), { ssr: false })
 
-type QcEntry = {
-    id: string | number
-    date: string
-    parameter: string
-    branch: string
-    level: 'L1' | 'L2' | 'L3'
-    value: number
-    enteredBy: string
-    enteredAt: string
-    zScore?: number | null
-}
-
-type TargetVersion = { mean: number; sd: number; validFrom: string }
 type TargetVersionsMap = Record<string, TargetVersion[]>
 type TargetMap = Record<string, { mean: number; sd: number; validFrom: string }>
-type Alert = {
-    id: string
-    date: string
-    parameter: string
-    branch: string
-    level: 'L1' | 'L2' | 'L3'
-    rule: string
-    severity: 'warning' | 'error'
-    description: string
-    acknowledged: boolean
-}
 
 export default function MedicalLabQADashboard() {
     const { claims, ready, logout } = useAuth()
@@ -95,23 +82,14 @@ export default function MedicalLabQADashboard() {
     const [pwReset, setPwReset] = useState<{ id: string; password: string } | null>(null)
     const [adminMessage, setAdminMessage] = useState<string | null>(null)
 
-    // Date formatting utilities
-    const formatDateDisplay = (isoDate: string): string => {
-        // Convert yyyy-MM-dd to dd/MM/yyyy for display
-        const [y, m, d] = isoDate.split('-')
-        return `${d}/${m}/${y}`
-    }
-
-    const formatDateTimeDisplay = (isoDateTime: string): string => {
-        // Convert ISO datetime to dd/MM/yyyy HH:mm
-        const date = new Date(isoDateTime)
-        const day = String(date.getDate()).padStart(2, '0')
-        const month = String(date.getMonth() + 1).padStart(2, '0')
-        const year = date.getFullYear()
-        const hours = String(date.getHours()).padStart(2, '0')
-        const minutes = String(date.getMinutes()).padStart(2, '0')
-        return `${day}/${month}/${year} ${hours}:${minutes}`
-    }
+    // Delete confirmation modal state
+    const [deleteModal, setDeleteModal] = useState<{
+        isOpen: boolean
+        type: 'branch' | 'technician' | null
+        item: { id: string; name: string } | null
+        cascadeOptions: DeleteOption[]
+        isDeleting: boolean
+    }>({ isOpen: false, type: null, item: null, cascadeOptions: [], isDeleting: false })
 
     // Display helpers (avoid showing raw UUIDs)
     const branchName = (id: string | undefined | null) => {
@@ -120,7 +98,7 @@ export default function MedicalLabQADashboard() {
         return b?.name || id
     }
     // User display: email and branch/role
-    const userEmail = (claims && (claims as any).email) ? (claims as any).email : (claims?.sub || 'User')
+    const userEmail = claims?.email || claims?.sub || 'User'
     const userBranchDisplay = isAdmin ? 'Admin' : (userBranch ? branchName(userBranch) : '')
 
     // Initial load
@@ -226,51 +204,24 @@ export default function MedicalLabQADashboard() {
         return () => { cancelled = true }
     }, [ready, claims, selectedBranch, dateRange.start, dateRange.end, isTech])
 
-    const effectiveTarget = (branch: string, parameter: string, level: string, onDate: string): TargetVersion | null => {
-        const key = `${branch}_${parameter}_${level}`
-        const versions = targetVersions[key]
-        if (!versions || !versions.length) return null
-        let chosen: TargetVersion | null = null
-        for (const v of versions) { if (v.validFrom <= onDate) chosen = v; else break }
-        return chosen || versions[0]
-    }
-    const calculateZ = (value: number, parameter: string, level: string, branch: string, date?: string) => {
-        const t = effectiveTarget(branch, parameter, level, date || new Date().toISOString().split('T')[0])
-        if (!t || !t.mean || !t.sd) return null
-        return (value - t.mean) / t.sd
-    }
-    const evaluateRules = (data: QcEntry[]) => {
-        const newAlerts: Alert[] = []
-        const sorted = [...data].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-        sorted.forEach((e, idx) => {
-            const z = e.zScore
-            if (z == null) return
-            if (Math.abs(z) > 3) newAlerts.push({ id: `${e.id}_1_3s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '1₃s', severity: 'error', description: `Single result exceeds ±3SD (Z=${z.toFixed(2)})`, acknowledged: false })
-            else if (Math.abs(z) > 2) newAlerts.push({ id: `${e.id}_1_2s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '1₂s', severity: 'warning', description: `Single result exceeds ±2SD (Z=${z.toFixed(2)})`, acknowledged: false })
-            if (idx > 0) {
-                const p = sorted[idx - 1]
-                if (p.parameter === e.parameter && p.level === e.level && p.branch === e.branch && p.zScore != null) {
-                    if (Math.abs(z) > 2 && Math.abs(p.zScore!) > 2 && Math.sign(z) === Math.sign(p.zScore!)) newAlerts.push({ id: `${e.id}_2_2s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '2₂s', severity: 'error', description: `Two consecutive results exceed ±2SD on same side`, acknowledged: false })
-                    if (Math.abs(z - p.zScore!) >= 4) newAlerts.push({ id: `${e.id}_R_4s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: 'R₄s', severity: 'error', description: `Range between consecutive results ≥4SD`, acknowledged: false })
-                }
-            }
-            if (idx >= 3) {
-                const r4 = sorted.slice(idx - 3, idx + 1)
-                if (r4.every(r => r.parameter === e.parameter && r.level === e.level && r.branch === e.branch && r.zScore != null && Math.abs(r.zScore!) > 1 && Math.sign(r.zScore!) === Math.sign(z))) newAlerts.push({ id: `${e.id}_4_1s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '4₁s', severity: 'error', description: `Four consecutive results exceed ±1SD on same side`, acknowledged: false })
-            }
-            if (idx >= 9) {
-                const r10 = sorted.slice(idx - 9, idx + 1)
-                if (r10.every(r => r.parameter === e.parameter && r.level === e.level && r.branch === e.branch && r.zScore != null && Math.sign(r.zScore!) === Math.sign(z))) newAlerts.push({ id: `${e.id}_10_x`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '10₁x', severity: 'error', description: `Ten consecutive results on same side of mean`, acknowledged: false })
-            }
-        })
+    // Wrapper functions that use imported utils with local state
+    const getEffectiveTarget = (branch: string, parameter: string, level: string, onDate: string) =>
+        effectiveTarget(targetVersions, branch, parameter, level, onDate)
+
+    const getCalculateZ = (value: number, parameter: string, level: string, branch: string, date?: string) =>
+        calculateZ(value, parameter, level, branch, date || new Date().toISOString().split('T')[0], targetVersions)
+
+    const runEvaluateRules = (data: QcEntry[]) => {
+        const newAlerts = evaluateRules(data)
         setAlerts(newAlerts)
     }
+
     const processed = useMemo(() => {
-        const p = qcData.map(e => ({ ...e, zScore: calculateZ(e.value, e.parameter, e.level, e.branch, e.date) }))
-        evaluateRules(p)
+        const p = qcData.map(e => ({ ...e, zScore: getCalculateZ(e.value, e.parameter, e.level, e.branch, e.date) }))
+        runEvaluateRules(p)
         return p
     }, [qcData, targetValues])
-    const recentProcessed = useMemo(() => recentQcData.map(e => ({ ...e, zScore: calculateZ(e.value, e.parameter, e.level, e.branch, e.date) })), [recentQcData, targetValues])
+    const recentProcessed = useMemo(() => recentQcData.map(e => ({ ...e, zScore: getCalculateZ(e.value, e.parameter, e.level, e.branch, e.date) })), [recentQcData, targetValues])
     useEffect(() => {
         const eff: TargetMap = {}
         Object.entries(targetVersions).forEach(([k, arr]) => {
@@ -286,21 +237,10 @@ export default function MedicalLabQADashboard() {
         const e = new Date(dateRange.end).getTime()
         return processed.filter(x => x.branch === selectedBranch && x.parameter === selectedParameter && new Date(x.date).getTime() >= s && new Date(x.date).getTime() <= e)
     }, [processed, selectedBranch, selectedParameter, dateRange])
-    const observedStats = useMemo(() => {
-        const stats: Record<string, { n: number; mean: string; sd: string }> = {}
-            ; (['L1', 'L2', 'L3'] as const).forEach(level => {
-                const data = filtered.filter(d => d.level === level)
-                if (data.length) {
-                    const values = data.map(d => d.value)
-                    const mean = values.reduce((a, b) => a + b, 0) / values.length
-                    const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / values.length
-                    const sd = Math.sqrt(variance)
-                    stats[level] = { n: values.length, mean: mean.toFixed(2), sd: sd.toFixed(2) }
-                }
-            })
-        return stats
-    }, [filtered])
-    const acknowledgeAlert = (id: string) => setAlerts(prev => prev.map(a => a.id === id ? { ...a, acknowledged: true } : a))
+
+    const observedStats = useMemo(() => calculateObservedStats(filtered), [filtered])
+
+    const acknowledgeAlert = (id: string | number) => setAlerts(prev => prev.map(a => a.id === id ? { ...a, acknowledged: true } : a))
     const chartData = useMemo(() => {
         const data: Record<'L1' | 'L2' | 'L3', any[]> = { L1: [], L2: [], L3: [] }
             ; (['L1', 'L2', 'L3'] as const).forEach(level => {
@@ -337,36 +277,8 @@ export default function MedicalLabQADashboard() {
         return rows.slice(0, 10)
     }, [recentProcessed, alerts, recentFilters, recentSortKey, recentSortDir])
 
-    const renderDataEntry = () => (
-        <div className="space-y-6">
-            <div className="bg-white rounded-lg shadow p-6">
-                <h2 className="text-xl font-semibold mb-4 flex items-center gap-2"><Plus className="w-5 h-5" />QC Data Entry</h2>
-                <form onSubmit={async (e) => { e.preventDefault(); const entries: QcEntry[] = []; (['l1', 'l2', 'l3'] as const).forEach(l => { const v = (entryForm as any)[l]; if (v) { entries.push({ id: Date.now() + Math.random(), date: entryForm.date, parameter: entryForm.parameter, branch: entryForm.branch, level: l.toUpperCase() as any, value: parseFloat(v), enteredBy: 'Current User', enteredAt: new Date().toISOString() }) } }); if (entries.length) { const res = await api.createQc(entries.map(e => ({ date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, value: e.value }))); if (res.ok) { setEntryForm({ ...entryForm, l1: '', l2: '', l3: '' }); const branchId = isTech && userBranch ? userBranch : selectedBranch; const r1 = await api.listQc({ branch_id: branchId, parameter_id: selectedParameter, start: dateRange.start, end: dateRange.end }); if (r1.ok && Array.isArray(r1.json?.items)) setQcData(r1.json.items as any); const r2 = await api.listQc({ branch_id: branchId, start: dateRange.start, end: dateRange.end }); if (r2.ok && Array.isArray(r2.json?.items)) setRecentQcData(r2.json.items as any) } } }} className="space-y-4">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div><label className="block text-sm font-medium mb-1">Date</label><input type="date" value={entryForm.date} onChange={e => setEntryForm({ ...entryForm, date: e.target.value })} className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500" required /></div>
-                        <div><label className="block text-sm font-medium mb-1">Branch</label><select value={entryForm.branch} onChange={e => setEntryForm({ ...entryForm, branch: e.target.value })} className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500" disabled={isTech}>{(isTech ? branches.filter(b => b.id === claims?.branch_id) : branches).map(b => (<option key={b.id} value={b.id}>{b.name}</option>))}</select></div>
-                        <div><label className="block text-sm font-medium mb-1">Parameter</label><select value={entryForm.parameter} onChange={e => setEntryForm({ ...entryForm, parameter: e.target.value })} className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500">{parameters.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))}</select></div>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">{(['l1', 'l2', 'l3'] as const).map((l, idx) => (<div key={l}><label className="block text-sm font-medium mb-1">L{idx + 1} Value</label><input type="number" step="0.01" value={(entryForm as any)[l]} onChange={(e) => setEntryForm({ ...entryForm, [l]: e.target.value })} className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500" placeholder={`Enter L${idx + 1} value`} /></div>))}</div>
-                    <div className="flex gap-2"><button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 flex items-center gap-2"><Save className="w-4 h-4" />Save Entry</button></div>
-                </form>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6">
-                <h3 className="text-lg font-semibold mb-2">Recent Entries</h3>
-                <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mb-3 text-xs">
-                    <input placeholder="Filter Date" value={recentFilters.date} onChange={e => setRecentFilters(f => ({ ...f, date: e.target.value }))} className="border rounded px-2 py-1" />
-                    <input placeholder="Filter Parameter" value={recentFilters.parameter} onChange={e => setRecentFilters(f => ({ ...f, parameter: e.target.value }))} className="border rounded px-2 py-1" />
-                    <input placeholder="Filter Level" value={recentFilters.level} onChange={e => setRecentFilters(f => ({ ...f, level: e.target.value }))} className="border rounded px-2 py-1" />
-                    <input placeholder="Filter Value" value={recentFilters.value} onChange={e => setRecentFilters(f => ({ ...f, value: e.target.value }))} className="border rounded px-2 py-1" />
-                    <input placeholder="Filter Z-Score" value={recentFilters.zScore} onChange={e => setRecentFilters(f => ({ ...f, zScore: e.target.value }))} className="border rounded px-2 py-1" />
-                    <input placeholder="Filter Status" value={recentFilters.status} onChange={e => setRecentFilters(f => ({ ...f, status: e.target.value }))} className="border rounded px-2 py-1" />
-                </div>
-                <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b"><th className="text-left py-2 cursor-pointer" onClick={() => toggleRecentSort('date')}>Date</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleRecentSort('parameter')}>Parameter</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleRecentSort('level')}>Level</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleRecentSort('value')}>Value</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleRecentSort('zScore')}>Z-Score</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleRecentSort('status')}>Status</th></tr></thead><tbody>{recentRows.map(e => (<tr key={e.id} className="border-b"><td className="py-2">{formatDateDisplay(e.date)}</td><td className="py-2">{e.parameter}</td><td className="py-2">{e.level}</td><td className="py-2">{e.value.toFixed(2)}</td><td className="py-2">{e.zScore == null ? '—' : e.zScore.toFixed(2)}</td><td className="py-2">{alerts.some(a => a.date === e.date && a.level === e.level && a.parameter === e.parameter && a.branch === e.branch) ? (<span className="text-red-600">Alert</span>) : (<span className="text-green-600">OK</span>)}</td></tr>))}</tbody></table></div>
-            </div>
-        </div>
-    )
-
-    const renderCharts = () => (<Charts selectedBranch={selectedBranch} selectedParameter={selectedParameter} branches={branches} parameters={parameters} chartData={chartData as any} targetValues={targetValues} observedStats={observedStats as any} setSelectedBranch={setSelectedBranch} setSelectedParameter={setSelectedParameter} />)
+    // Charts data processing
+    const renderCharts = () => (<Charts selectedBranch={selectedBranch} selectedParameter={selectedParameter} parameters={parameters} chartData={chartData as any} targetValues={targetValues} observedStats={observedStats as any} setSelectedParameter={setSelectedParameter} />)
 
     // Alerts table sort/filter
     const [alertSortKey, setAlertSortKey] = useState<string>('date')
@@ -377,17 +289,7 @@ export default function MedicalLabQADashboard() {
         const rows = alerts.filter(a => { const m: Record<string, string> = { date: a.date, branch: a.branch, parameter: a.parameter, level: a.level, rule: a.rule, description: a.description, severity: a.severity, acknowledged: a.acknowledged ? 'yes' : 'no' }; return Object.entries(alertFilters).every(([k, v]) => (v || '').trim() === '' || (m[k] || '').toLowerCase().includes(v.toLowerCase().trim())) }).sort((a: any, b: any) => { const get = (r: any) => (r as any)[alertSortKey]; const va = get(a), vb = get(b); if (typeof va === 'number' && typeof vb === 'number') return alertSortDir === 'asc' ? va - vb : vb - va; return alertSortDir === 'asc' ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va)) })
         return rows
     }, [alerts, alertFilters, alertSortKey, alertSortDir])
-    const renderAlerts = () => (
-        <div className="space-y-6">
-            <div className="bg-white rounded-lg shadow p-6">
-                <h2 className="text-xl font-semibold mb-4 flex items-center gap-2"><AlertTriangle className="w-5 h-5" />Westgard Rule Alerts</h2>
-                <div className="mb-4"><div className="grid grid-cols-4 gap-4 text-sm"><div className="bg-red-50 p-3 rounded"><div className="font-medium text-red-800">Critical Alerts</div><div className="text-2xl font-bold text-red-600">{alerts.filter(a => a.severity === 'error' && !a.acknowledged).length}</div></div><div className="bg-yellow-50 p-3 rounded"><div className="font-medium text-yellow-800">Warnings</div><div className="text-2xl font-bold text-yellow-600">{alerts.filter(a => a.severity === 'warning' && !a.acknowledged).length}</div></div><div className="bg-green-50 p-3 rounded"><div className="font-medium text-green-800">Acknowledged</div><div className="text-2xl font-bold text-green-600">{alerts.filter(a => a.acknowledged).length}</div></div><div className="bg-blue-50 p-3 rounded"><div className="font-medium text-blue-800">Total Alerts</div><div className="text-2xl font-bold text-blue-600">{alerts.length}</div></div></div></div>
-                <div className="grid grid-cols-2 md:grid-cols-8 gap-2 mb-3 text-xs"><input placeholder="Filter Date" value={alertFilters.date} onChange={e => setAlertFilters(f => ({ ...f, date: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Branch" value={alertFilters.branch} onChange={e => setAlertFilters(f => ({ ...f, branch: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Parameter" value={alertFilters.parameter} onChange={e => setAlertFilters(f => ({ ...f, parameter: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Level" value={alertFilters.level} onChange={e => setAlertFilters(f => ({ ...f, level: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Rule" value={alertFilters.rule} onChange={e => setAlertFilters(f => ({ ...f, rule: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Description" value={alertFilters.description} onChange={e => setAlertFilters(f => ({ ...f, description: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Severity" value={alertFilters.severity} onChange={e => setAlertFilters(f => ({ ...f, severity: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Ack (yes/no)" value={alertFilters.acknowledged} onChange={e => setAlertFilters(f => ({ ...f, acknowledged: e.target.value }))} className="border rounded px-2 py-1" /></div>
-                <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b"><th className="text-left py-2 cursor-pointer" onClick={() => toggleAlertSort('date')}>Date</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleAlertSort('branch')}>Branch</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleAlertSort('parameter')}>Parameter</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleAlertSort('level')}>Level</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleAlertSort('rule')}>Rule</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleAlertSort('description')}>Description</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleAlertSort('severity')}>Severity</th><th className="text-left py-2">Action</th></tr></thead><tbody>{alertRows.map(a => (<tr key={a.id} className={`border-b ${a.acknowledged ? 'opacity-50' : ''}`}><td className="py-2">{formatDateDisplay(a.date)}</td><td className="py-2">{branchName(a.branch)}</td><td className="py-2">{a.parameter}</td><td className="py-2">{a.level}</td><td className="py-2"><span className={`px-2 py-1 rounded text-xs font-medium ${a.rule === '1₂s' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{a.rule}</span></td><td className="py-2">{a.description}</td><td className="py-2">{a.severity}</td><td className="py-2"><button className="text-blue-600 hover:underline disabled:text-gray-400" disabled={a.acknowledged} onClick={() => acknowledgeAlert(a.id)}>Acknowledge</button></td></tr>))}</tbody></table></div>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6"><h3 className="text-lg font-semibold mb-4">Westgard Rules Reference</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm"><div className="space-y-2"><div className="flex items-center gap-2"><span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-xs font-medium">1₂s</span><span>Warning: Single result exceeds ±2SD</span></div><div className="flex items-center gap-2"><span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-medium">1₃s</span><span>Error: Single result exceeds ±3SD</span></div><div className="flex items-center gap-2"><span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-medium">2₂s</span><span>Error: 2 consecutive results exceed ±2SD (same side)</span></div></div><div className="space-y-2"><div className="flex items-center gap-2"><span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-medium">R₄s</span><span>Error: Range between consecutive results ≥4SD</span></div><div className="flex items-center gap-2"><span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-medium">4₁s</span><span>Error: 4 consecutive results exceed ±1SD (same side)</span></div><div className="flex items-center gap-2"><span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-medium">10ₓ</span><span>Error: 10 consecutive results on same side of mean</span></div></div></div></div>
-        </div>
-    )
+
 
     // Targets table
     const [targetSortKey, setTargetSortKey] = useState<string>('branch')
@@ -412,9 +314,7 @@ export default function MedicalLabQADashboard() {
         })
         return rows
     }, [targetVersions, branches, parameters, targetFilters, targetSortKey, targetSortDir])
-    const renderTargets = () => (
-        <div className="space-y-6"><div className="bg-white rounded-lg shadow p-6"><div className="flex justify-between items-center mb-4"><h2 className="text-xl font-semibold flex items-center gap-2"><Settings className="w-5 h-5" />Target Mean & SD Management</h2><button onClick={() => { setShowTargetModal(true); setEditingTarget(null) }} className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 flex items-center gap-2"><Plus className="w-4 h-4" />Add Target</button></div><div className="grid grid-cols-2 md:grid-cols-6 gap-2 mb-3 text-xs"><input placeholder="Filter Branch" value={targetFilters.branch} onChange={e => setTargetFilters(f => ({ ...f, branch: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Parameter" value={targetFilters.parameter} onChange={e => setTargetFilters(f => ({ ...f, parameter: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Level" value={targetFilters.level} onChange={e => setTargetFilters(f => ({ ...f, level: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Mean" value={targetFilters.mean} onChange={e => setTargetFilters(f => ({ ...f, mean: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter SD" value={targetFilters.sd} onChange={e => setTargetFilters(f => ({ ...f, sd: e.target.value }))} className="border rounded px-2 py-1" /><input placeholder="Filter Valid From" value={targetFilters.validFrom} onChange={e => setTargetFilters(f => ({ ...f, validFrom: e.target.value }))} className="border rounded px-2 py-1" /></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b"><th className="text-left py-2 cursor-pointer" onClick={() => toggleTargetSort('branch')}>Branch</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleTargetSort('parameter')}>Parameter</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleTargetSort('level')}>Level</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleTargetSort('mean')}>Mean</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleTargetSort('sd')}>SD</th><th className="text-left py-2 cursor-pointer" onClick={() => toggleTargetSort('validFrom')}>Valid From</th><th className="text-left py-2">Actions</th></tr></thead><tbody>{targetRows.map(r => (<tr key={r.key} className="border-b"><td className="py-2">{r.branchName}</td><td className="py-2">{r.parameterName}</td><td className="py-2">{r.level}</td><td className="py-2">{r.mean}</td><td className="py-2">{r.sd}</td><td className="py-2">{formatDateDisplay(r.validFrom)}</td><td className="py-2"><button className="text-blue-600 hover:underline" onClick={() => { setEditingTarget(r.key); setShowTargetModal(true); setTargetForm({ parameter: r.parameterId, level: r.level, branch: r.branchId, mean: String(r.mean), sd: String(r.sd), validFrom: r.validFrom }) }}>Edit</button></td></tr>))}</tbody></table></div></div></div>
-    )
+
 
     // Report functions
     const exportReportCSV = () => {
@@ -464,6 +364,8 @@ export default function MedicalLabQADashboard() {
         return () => { if (dispose) dispose() }
     }, [])
 
+    // Utility
+    const wait = (ms: number) => new Promise(r => setTimeout(r, ms))
 
     // Google Doc export (stateless; charts images to be added later)
     const exportGoogleDoc = async () => {
@@ -474,14 +376,12 @@ export default function MedicalLabQADashboard() {
             let accessToken = await ensureGoogleAccessToken(apiBase)
             if (!accessToken) {
                 await startGoogleOAuth(apiBase)
-                const wait = (ms: number) => new Promise(r => setTimeout(r, ms))
                 for (let i = 0; i < 60; i++) { await wait(500); accessToken = await ensureGoogleAccessToken(apiBase); if (accessToken) break }
             }
             if (!accessToken) throw new Error('Authorization required – Google OAuth not completed')
             const rasterizeCharts = async () => {
                 type Capture = { parameterId: string; name: string; pngBase64: string }
                 const captures: Capture[] = []
-                const wait = (ms: number) => new Promise(r => setTimeout(r, ms))
                 // Inject fallback palette to neutralize oklch() (which html2canvas cannot parse)
                 let paletteStyle = document.querySelector('style[data-gdoc-color-fallback]') as HTMLStyleElement | null
                 if (!paletteStyle) {
@@ -880,291 +780,160 @@ export default function MedicalLabQADashboard() {
     const refreshBranches = async () => {
         const b = await api.getBranches(); if (b.ok && Array.isArray(b.json?.items)) setBranches(b.json.items)
     }
+
+    const refreshParameters = async () => {
+        const p = await api.getParameters(); if (p.ok && Array.isArray(p.json?.items)) setParameters(p.json.items)
+    }
     const refreshTechnicians = async () => {
         if (!isAdmin) return; const r = await api.adminListTechnicians(); if (r.ok && Array.isArray(r.json?.items)) setTechnicians(r.json.items)
     }
+
+    // Calculate cascade delete options for branch
+    const getBranchCascadeOptions = (branchId: string): DeleteOption[] => {
+        const options: DeleteOption[] = []
+
+        // Always offer to delete QC entries (we can't count all of them from frontend due to date filtering)
+        // The count shown is only for visible entries, actual count may be higher
+        const qcCount = recentQcData.filter(q => q.branch === branchId).length
+        options.push({
+            id: 'qc_entries',
+            label: qcCount > 0 ? `${qcCount}+ QC Data Entries` : 'QC Data Entries (if any)',
+            description: `All quality control measurements for this branch (across all dates)`,
+            checked: true
+        })
+
+        // Always offer to delete targets
+        const targetCount = Object.keys(targetVersions).filter(k => k.startsWith(branchId + '_')).length
+        options.push({
+            id: 'targets',
+            label: targetCount > 0 ? `${targetCount} Target Configurations` : 'Target Configurations (if any)',
+            description: `Target mean and SD values for parameters`,
+            checked: true
+        })
+
+        // Count technicians
+        const techCount = technicians.filter(t => t.branch_id === branchId).length
+        if (techCount > 0) {
+            options.push({
+                id: 'technicians',
+                label: `${techCount} Technician${techCount > 1 ? 's' : ''}`,
+                description: `Users assigned to this branch will be unlinked (not deleted)`,
+                checked: false // Don't delete technicians by default
+            })
+        }
+
+        // Note: Alerts are computed dynamically from QC entries, not stored separately.
+        // When QC entries are deleted, their associated alerts disappear automatically.
+
+        return options
+    }
+
+    // Calculate cascade delete options for technician
+    const getTechnicianCascadeOptions = (techId: string): DeleteOption[] => {
+        const options: DeleteOption[] = []
+
+        // Note: QC entries don't currently track technician_id, so we can't cascade delete them
+        // If needed in future, add technician_id to QcEntry type and track it
+
+        return options
+    }
+
     const handleBranchCreate = async (e: React.FormEvent) => { e.preventDefault(); if (!branchCreateName.trim()) return; const r = await api.adminCreateBranch(branchCreateName.trim()); if (r.ok) { setBranchCreateName(''); setAdminMessage('Branch created'); refreshBranches() } else setAdminMessage('Failed to create branch') }
     const handleBranchUpdate = async (e: React.FormEvent) => { e.preventDefault(); if (!branchEdit) return; const r = await api.adminUpdateBranch(branchEdit.id, branchEdit.name.trim()); if (r.ok) { setAdminMessage('Branch updated'); setBranchEdit(null); refreshBranches() } else setAdminMessage('Failed to update branch') }
-    const handleBranchDelete = async (id: string) => { if (!confirm('Delete branch? This may fail if branch has data.')) return; const r = await api.adminDeleteBranch(id); if (r.ok) { setAdminMessage('Branch deleted'); refreshBranches() } else setAdminMessage(r.status === 409 ? 'Branch in use' : 'Delete failed') }
+
+    const handleBranchDelete = (id: string) => {
+        const branch = branches.find(b => b.id === id)
+        if (!branch) return
+
+        const cascadeOptions = getBranchCascadeOptions(id)
+        setDeleteModal({
+            isOpen: true,
+            type: 'branch',
+            item: { id: branch.id, name: branch.name },
+            cascadeOptions,
+            isDeleting: false
+        })
+    }
+
     const handleTechCreate = async (e: React.FormEvent) => { e.preventDefault(); if (!techCreate.email || !techCreate.password) return; const r = await api.adminCreateTechnician(techCreate.email, techCreate.password, techCreate.branch_id || undefined); if (r.ok) { setTechCreate({ email: '', password: '', branch_id: '' }); setAdminMessage('Technician created'); refreshTechnicians() } else setAdminMessage('Failed to create technician') }
     const handleTechUpdate = async (e: React.FormEvent) => { e.preventDefault(); if (!techEdit) return; const r = await api.adminUpdateTechnician(techEdit.id, { email: techEdit.email, branch_id: techEdit.branch_id || null }); if (r.ok) { setTechEdit(null); setAdminMessage('Technician updated'); refreshTechnicians() } else setAdminMessage('Update failed') }
-    const handleTechDelete = async (id: string) => { if (!confirm('Delete technician?')) return; const r = await api.adminDeleteTechnician(id); if (r.ok) { setAdminMessage('Technician deleted'); refreshTechnicians() } else setAdminMessage('Delete failed') }
+
+    const handleTechDelete = (id: string) => {
+        const tech = technicians.find(t => t.id === id)
+        if (!tech) return
+
+        const cascadeOptions = getTechnicianCascadeOptions(id)
+        setDeleteModal({
+            isOpen: true,
+            type: 'technician',
+            item: { id: tech.id, name: tech.email },
+            cascadeOptions,
+            isDeleting: false
+        })
+    }
+
+    const confirmDelete = async (selectedOptions: string[]) => {
+        if (!deleteModal.item) return
+
+        setDeleteModal(prev => ({ ...prev, isDeleting: true }))
+
+        try {
+            if (deleteModal.type === 'branch') {
+                const r = await api.adminDeleteBranch(deleteModal.item.id, selectedOptions)
+                if (r.ok) {
+                    setAdminMessage('Branch deleted successfully')
+                    refreshBranches()
+                    setDeleteModal({ isOpen: false, type: null, item: null, cascadeOptions: [], isDeleting: false })
+                } else {
+                    // Parse error response
+                    let errorMsg = 'Delete failed'
+                    if (r.status === 409) {
+                        const detail = r.json?.detail || ''
+                        if (detail.startsWith('branch_in_use:')) {
+                            // Extract the helpful message from the backend
+                            errorMsg = detail.replace('branch_in_use: ', '❌ Cannot delete branch: ')
+                        } else if (detail === 'branch_in_use') {
+                            errorMsg = '⚠️ Branch has related data. Please select cascade options to delete related items.'
+                        } else {
+                            errorMsg = detail || 'Branch has related data that must be handled first.'
+                        }
+                    } else if (r.json?.detail) {
+                        errorMsg = r.json.detail
+                    }
+                    setAdminMessage(errorMsg)
+                    setDeleteModal(prev => ({ ...prev, isDeleting: false }))
+                }
+            } else if (deleteModal.type === 'technician') {
+                const r = await api.adminDeleteTechnician(deleteModal.item.id, selectedOptions)
+                if (r.ok) {
+                    setAdminMessage('Technician deleted successfully')
+                    refreshTechnicians()
+                    setDeleteModal({ isOpen: false, type: null, item: null, cascadeOptions: [], isDeleting: false })
+                } else {
+                    let errorMsg = 'Delete failed'
+                    if (r.status === 409 && r.json?.detail === 'technician_in_use') {
+                        errorMsg = '⚠️ Backend does not support cascade delete yet. Please manually delete related data first.'
+                    } else if (r.json?.detail) {
+                        errorMsg = r.json.detail
+                    }
+                    setAdminMessage(errorMsg)
+                    setDeleteModal(prev => ({ ...prev, isDeleting: false }))
+                }
+            }
+        } catch (error) {
+            setAdminMessage('Delete operation failed: ' + (error instanceof Error ? error.message : 'Unknown error'))
+            setDeleteModal(prev => ({ ...prev, isDeleting: false }))
+        }
+    }
+
+    const cancelDelete = () => {
+        setDeleteModal({ isOpen: false, type: null, item: null, cascadeOptions: [], isDeleting: false })
+    }
     const handlePwReset = async (e: React.FormEvent) => { e.preventDefault(); if (!pwReset) return; const r = await api.adminChangeTechnicianPassword(pwReset.id, pwReset.password); if (r.ok) { setPwReset(null); setAdminMessage('Password changed'); } else setAdminMessage('Password change failed') }
 
-    const renderAdmin = () => (
-        <div className="space-y-8">
-            <div className="bg-white rounded-lg shadow p-6">
-                <h2 className="text-xl font-semibold mb-4">Branch Management</h2>
-                <form onSubmit={handleBranchCreate} className="flex flex-col md:flex-row gap-2 mb-4">
-                    <input value={branchCreateName} onChange={e => setBranchCreateName(e.target.value)} placeholder="New branch name" className="border rounded px-3 py-2 flex-1" />
-                    <button className="bg-blue-600 text-white px-4 py-2 rounded">Add Branch</button>
-                </form>
-                {branchEdit && <form onSubmit={handleBranchUpdate} className="flex flex-col md:flex-row gap-2 mb-4 bg-blue-50 p-3 rounded">
-                    <input value={branchEdit.name} onChange={e => setBranchEdit({ ...branchEdit, name: e.target.value })} className="border rounded px-3 py-2 flex-1" />
-                    <div className="flex gap-2"><button className="bg-green-600 text-white px-4 py-2 rounded">Save</button><button type="button" onClick={() => setBranchEdit(null)} className="px-4 py-2 rounded border">Cancel</button></div>
-                </form>}
-                <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b"><th className="text-left py-2">Name</th><th className="text-left py-2">Actions</th></tr></thead><tbody>{branches.map(b => (<tr key={b.id} className="border-b"><td className="py-2">{b.name}</td><td className="py-2 flex gap-2"><button className="text-blue-600 hover:underline" onClick={() => setBranchEdit({ id: b.id, name: b.name })}>Rename</button><button className="text-red-600 hover:underline" onClick={() => handleBranchDelete(b.id)}>Delete</button></td></tr>))}</tbody></table></div>
-            </div>
-            <div className="bg-white rounded-lg shadow p-6">
-                <h2 className="text-xl font-semibold mb-4">Technician Management</h2>
-                <form onSubmit={handleTechCreate} className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-4">
-                    <input value={techCreate.email} onChange={e => setTechCreate(c => ({ ...c, email: e.target.value }))} placeholder="Email" className="border rounded px-3 py-2" />
-                    <input value={techCreate.password} onChange={e => setTechCreate(c => ({ ...c, password: e.target.value }))} placeholder="Password" type="password" className="border rounded px-3 py-2" />
-                    <select value={techCreate.branch_id} onChange={e => setTechCreate(c => ({ ...c, branch_id: e.target.value }))} className="border rounded px-3 py-2">
-                        <option value="">(No Branch)</option>
-                        {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                    </select>
-                    <button className="bg-blue-600 text-white px-4 py-2 rounded">Add Technician</button>
-                </form>
-                {techEdit && <form onSubmit={handleTechUpdate} className="grid grid-cols-1 md:grid-cols-4 gap-2 mb-4 bg-blue-50 p-3 rounded">
-                    <input value={techEdit.email} onChange={e => setTechEdit(t => t ? { ...t, email: e.target.value } : t)} className="border rounded px-3 py-2" />
-                    <select value={techEdit.branch_id} onChange={e => setTechEdit(t => t ? { ...t, branch_id: e.target.value } : t)} className="border rounded px-3 py-2">
-                        <option value="">(No Branch)</option>
-                        {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                    </select>
-                    <div className="flex gap-2 col-span-1 md:col-span-2"><button className="bg-green-600 text-white px-4 py-2 rounded" type="submit">Save</button><button type="button" className="px-4 py-2 rounded border" onClick={() => setTechEdit(null)}>Cancel</button></div>
-                </form>}
-                {pwReset && <form onSubmit={handlePwReset} className="flex flex-col md:flex-row gap-2 mb-4 bg-amber-50 p-3 rounded">
-                    <input value={pwReset.password} onChange={e => setPwReset(p => p ? { ...p, password: e.target.value } : p)} placeholder="New password" type="password" className="border rounded px-3 py-2 flex-1" />
-                    <div className="flex gap-2"><button className="bg-purple-600 text-white px-4 py-2 rounded">Change</button><button type="button" onClick={() => setPwReset(null)} className="px-4 py-2 rounded border">Cancel</button></div>
-                </form>}
-                <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b"><th className="text-left py-2">Email</th><th className="text-left py-2">Branch</th><th className="text-left py-2">Created</th><th className="text-left py-2">Actions</th></tr></thead><tbody>{techLoading ? <tr><td colSpan={4} className="py-4 text-center text-gray-500">Loading…</td></tr> : technicians.map(t => (<tr key={t.id} className="border-b"><td className="py-2">{t.email}</td><td className="py-2">{branchName(t.branch_id || '') || '—'}</td><td className="py-2">{t.created_at ? formatDateDisplay(t.created_at.split('T')[0]) : ''}</td><td className="py-2 flex flex-wrap gap-2"><button className="text-blue-600 hover:underline" onClick={() => setTechEdit({ id: t.id, email: t.email, branch_id: t.branch_id || '' })}>Edit</button><button className="text-indigo-600 hover:underline" onClick={() => setPwReset({ id: t.id, password: '' })}>Password</button><button className="text-red-600 hover:underline" onClick={() => handleTechDelete(t.id)}>Delete</button></td></tr>))}</tbody></table></div>
-            </div>
-            {adminMessage && <div className="text-sm text-green-700 bg-green-50 border border-green-200 px-3 py-2 rounded">{adminMessage}</div>}
-        </div>
-    )
 
-    const renderReports = () => {
-        return (
-            <div className="space-y-8" ref={reportRootRef} data-report-root>
-                {/* Description only */}
-                <div className="bg-white shadow rounded-lg p-4 text-sm" ref={narrativeRef} data-report-section="narrative">
-                    <h3 className="font-semibold mb-2">Description</h3>
-                    <textarea value={narrativeText} onChange={e => setNarrativeText(e.target.value)} rows={6} className="w-full border rounded p-2 text-xs focus:ring-2 focus:ring-blue-500" placeholder="Enter description to include in export." />
-                </div>
-                {/* Existing Front Matter follows */}
-                <div className="bg-white shadow rounded-lg p-4 text-sm grid md:grid-cols-2 gap-4" ref={frontMatterRef} data-report-section="front-matter">
-                    <div>
-                        <div><span className="font-medium">Branch:</span> {branchName(selectedBranch)}</div>
-                        <div><span className="font-medium">Parameters:</span> {allParameterIdsForBranch.length} ({allParameterIdsForBranch.map(pid => parameters.find(p => p.id === pid)?.name || pid).join(', ')})</div>
-                        <div><span className="font-medium">Period:</span> {formatDateDisplay(dateRange.start)} → {formatDateDisplay(dateRange.end)}</div>
-                        <div><span className="font-medium">Generated:</span> {formatDateTimeDisplay(new Date().toISOString())}</div>
-                    </div>
-                    <div className="flex flex-col gap-2 text-xs">
-                        <label className="flex items-center gap-2"> <span className="font-medium w-20">Prepared By</span>
-                            <input value={preparedBy} onChange={e => setPreparedBy(e.target.value)} placeholder="Name" className="flex-1 border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                        </label>
-                        <label className="flex items-center gap-2"> <span className="font-medium w-20">Reviewed By</span>
-                            <input value={reviewedBy} onChange={e => setReviewedBy(e.target.value)} placeholder="Name" className="flex-1 border rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                        </label>
-                        <div><span className="font-medium">Version:</span> {dateRange.start.slice(0, 7)}</div>
-                    </div>
-                </div>
-                {/* Visible LJ Charts */}
-                {/* Removed old per-level LJ charts in favor of combined multi-parameter charts */}
-                {/* Statistics Table */}
-                <div className="bg-white shadow rounded-lg p-4" ref={statsRef} data-report-section="statistics">
-                    <h3 className="font-semibold mb-3 text-sm">QC Statistics</h3>
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-xs">
-                            <thead className="bg-gray-50">
-                                <tr className="border-b">
-                                    <th className="p-2 text-left">Parameter</th>
-                                    <th className="p-2 text-left">Level</th>
-                                    <th className="p-2 text-right">n</th>
-                                    <th className="p-2 text-right">Mean</th>
-                                    <th className="p-2 text-right">SD</th>
-                                    <th className="p-2 text-right">CV%</th>
-                                    <th className="p-2 text-right">1₂s</th>
-                                    <th className="p-2 text-right">1₃s</th>
-                                    <th className="p-2 text-right">2₂s</th>
-                                    <th className="p-2 text-right">R₄s</th>
-                                    <th className="p-2 text-right">4₁s</th>
-                                    <th className="p-2 text-right">10ₓ</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {allReportStats.map(r => {
-                                    const paramName = parameters.find(p => p.id === r.parameter)?.name || r.parameter
-                                    return (
-                                        <tr key={paramName + "_" + r.level} className="border-b">
-                                            <td className="p-2 font-medium">{paramName}</td>
-                                            <td className="p-2">{r.level}</td>
-                                            <td className="p-2 text-right">{r.n}</td>
-                                            <td className="p-2 text-right">{r.n ? r.mean.toFixed(3) : '—'}</td>
-                                            <td className="p-2 text-right">{r.n > 1 ? r.sd.toFixed(3) : '—'}</td>
-                                            <td className="p-2 text-right">{r.cv != null ? r.cv.toFixed(1) : '—'}</td>
-                                            <td className="p-2 text-right">{r.rules['1₂s'] || 0}</td>
-                                            <td className="p-2 text-right">{r.rules['1₃s'] || 0}</td>
-                                            <td className="p-2 text-right">{r.rules['2₂s'] || 0}</td>
-                                            <td className="p-2 text-right">{r.rules['R₄s'] || 0}</td>
-                                            <td className="p-2 text-right">{r.rules['4₁s'] || 0}</td>
-                                            <td className="p-2 text-right">{r.rules['10ₓ'] || 0}</td>
-                                        </tr>
-                                    )
-                                })}
-                                {!allReportStats.length && <tr><td colSpan={12} className="p-4 text-center text-gray-500">No statistics for selected period.</td></tr>}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                {/* Westgard Rule Violations */}
-                <div className="bg-white shadow rounded-lg p-4" data-report-section="rule-violations">
-                    <h3 className="font-semibold mb-3 text-sm">Westgard Rule Violations</h3>
-                    <div className="mb-4 grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
-                        <div className="bg-red-50 p-3 rounded border border-red-200">
-                            <div className="font-medium text-red-800">Critical Violations</div>
-                            <div className="text-2xl font-bold text-red-600">{reportAlerts.filter(a => a.severity === 'error').length}</div>
-                        </div>
-                        <div className="bg-yellow-50 p-3 rounded border border-yellow-200">
-                            <div className="font-medium text-yellow-800">Warnings</div>
-                            <div className="text-2xl font-bold text-yellow-600">{reportAlerts.filter(a => a.severity === 'warning').length}</div>
-                        </div>
-                        <div className="bg-blue-50 p-3 rounded border border-blue-200">
-                            <div className="font-medium text-blue-800">Total Violations</div>
-                            <div className="text-2xl font-bold text-blue-600">{reportAlerts.length}</div>
-                        </div>
-                    </div>
-                    {reportAlerts.length > 0 ? (
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-xs">
-                                <thead className="bg-gray-50">
-                                    <tr className="border-b">
-                                        <th className="p-2 text-left">Date</th>
-                                        <th className="p-2 text-left">Parameter</th>
-                                        <th className="p-2 text-left">Level</th>
-                                        <th className="p-2 text-left">Rule</th>
-                                        <th className="p-2 text-left">Description</th>
-                                        <th className="p-2 text-left">Severity</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {reportAlerts.map(a => {
-                                        const paramName = parameters.find(p => p.id === a.parameter)?.name || a.parameter
-                                        return (
-                                            <tr key={a.id} className="border-b hover:bg-gray-50">
-                                                <td className="p-2">{formatDateDisplay(a.date)}</td>
-                                                <td className="p-2 font-medium">{paramName}</td>
-                                                <td className="p-2">{a.level}</td>
-                                                <td className="p-2">
-                                                    <span className={`px-2 py-1 rounded font-medium ${a.rule === '1₂s' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
-                                                        {a.rule}
-                                                    </span>
-                                                </td>
-                                                <td className="p-2">{a.description}</td>
-                                                <td className="p-2">
-                                                    <span className={`px-2 py-1 rounded text-xs font-medium ${a.severity === 'error' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                                                        {a.severity === 'error' ? 'Critical' : 'Warning'}
-                                                    </span>
-                                                </td>
-                                            </tr>
-                                        )
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                    ) : (
-                        <div className="text-center p-6 bg-green-50 rounded border border-green-200">
-                            <div className="text-green-800 font-medium">✓ No Westgard Rule Violations</div>
-                            <div className="text-green-600 text-xs mt-1">All QC results are within acceptable limits for this period.</div>
-                        </div>
-                    )}
-                    <div className="mt-4 p-3 bg-gray-50 rounded text-xs">
-                        <div className="font-medium mb-2">Rule Reference:</div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                            <div><span className="font-medium">1₂s:</span> Single result exceeds ±2SD (Warning)</div>
-                            <div><span className="font-medium">1₃s:</span> Single result exceeds ±3SD (Critical)</div>
-                            <div><span className="font-medium">2₂s:</span> 2 consecutive results exceed ±2SD same side (Critical)</div>
-                            <div><span className="font-medium">R₄s:</span> Range between consecutive results ≥4SD (Critical)</div>
-                            <div><span className="font-medium">4₁s:</span> 4 consecutive results exceed ±1SD same side (Critical)</div>
-                            <div><span className="font-medium">10ₓ:</span> 10 consecutive results on same side of mean (Critical)</div>
-                        </div>
-                    </div>
-                </div>
-                {/* Combined Z-Score Charts */}
-                <div className="bg-white shadow rounded-lg p-2" ref={chartsRef} data-report-section="charts">
-                    <h3 className="font-semibold mb-2 text-sm">Combined Z-Score Charts</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3" data-report-charts-grid>
-                        {allParameterIdsForBranch.map(pid => {
-                            const param = parameters.find(p => p.id === pid)
-                            const rows = recentProcessed.filter(r => r.branch === selectedBranch && r.parameter === pid && new Date(r.date) >= new Date(dateRange.start) && new Date(r.date) <= new Date(dateRange.end))
-                            if (!rows.length) return null
 
-                            // Combine data into single array with one entry per date
-                            const dateMap = new Map<string, { date: string; L1Z?: number; L2Z?: number; L3Z?: number }>()
-                            rows.forEach(r => {
-                                if (!dateMap.has(r.date)) {
-                                    dateMap.set(r.date, { date: r.date })
-                                }
-                                const entry = dateMap.get(r.date)!
-                                if (r.zScore !== null) {
-                                    if (r.level === 'L1') entry.L1Z = r.zScore
-                                    else if (r.level === 'L2') entry.L2Z = r.zScore
-                                    else if (r.level === 'L3') entry.L3Z = r.zScore
-                                }
-                            })
-                            const combinedData = Array.from(dateMap.values()).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
 
-                            const domain = [-3.5, 3.5]
-                            return (
-                                <div key={pid} className="border rounded-md p-2 bg-white" data-combined-chart={pid}>
-                                    <div className="mb-1 text-xs font-semibold">
-                                        <span>{param?.name || pid}</span>
-                                    </div>
-                                    <div className="h-80">
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <LineChart data={combinedData} margin={{ top: 5, left: 0, right: 10, bottom: 10 }}>
-                                                <CartesianGrid stroke="#eee" strokeDasharray="4 4" />
-                                                <XAxis
-                                                    dataKey="date"
-                                                    type="category"
-                                                    tick={{ fontSize: 10, angle: -45, textAnchor: 'end' } as any}
-                                                    height={45}
-                                                    interval={0}
-                                                    tickFormatter={(value) => {
-                                                        const date = new Date(value);
-                                                        const day = String(date.getDate()).padStart(2, '0');
-                                                        const month = String(date.getMonth() + 1).padStart(2, '0');
-                                                        return `${day}/${month}`;
-                                                    }}
-                                                />
-                                                <YAxis
-                                                    domain={domain}
-                                                    tick={{ fontSize: 10 }}
-                                                    ticks={[-3, -2, -1, 0, 1, 2, 3]}
-                                                    width={30}
-                                                />
-                                                <Tooltip formatter={(val: any) => [val, 'Z']} />
-                                                <ReferenceLine y={0} stroke="#111827" strokeWidth={2} />
-                                                <ReferenceLine y={1} stroke="#6b7280" strokeDasharray="4 4" />
-                                                <ReferenceLine y={-1} stroke="#6b7280" strokeDasharray="4 4" />
-                                                <ReferenceLine y={2} stroke="#f59e0b" strokeDasharray="4 4" />
-                                                <ReferenceLine y={-2} stroke="#f59e0b" strokeDasharray="4 4" />
-                                                <ReferenceLine y={3} stroke="#dc2626" strokeDasharray="4 4" />
-                                                <ReferenceLine y={-3} stroke="#dc2626" strokeDasharray="4 4" />
-                                                <Line dataKey="L1Z" name="L1" stroke="#2563eb" dot={{ r: 2 }} isAnimationActive={false} connectNulls type="monotone" />
-                                                <Line dataKey="L2Z" name="L2" stroke="#16a34a" dot={{ r: 2 }} isAnimationActive={false} connectNulls type="monotone" />
-                                                <Line dataKey="L3Z" name="L3" stroke="#9333ea" dot={{ r: 2 }} isAnimationActive={false} connectNulls type="monotone" />
-                                            </LineChart>
-                                        </ResponsiveContainer>
-                                    </div>
-                                </div>
-                            )
-                        })}
-                        {!allParameterIdsForBranch.length && <div className="text-xs text-gray-500">No charts for selected period.</div>}
-                    </div>
-                </div>
-                {/* Export Actions (CSV + Google Doc only) */}
-                <div className="flex gap-3 justify-end">
-                    <button onClick={exportReportCSV} disabled={exporting} className="px-4 py-2 text-xs rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50">CSV</button>
-                    <button onClick={exportGoogleDoc} disabled={gdocExporting} className="px-4 py-2 text-xs rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50 flex items-center gap-2">
-                        {gdocExporting && (<svg className="animate-spin h-3 w-3 text-white" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>)}
-                        <span>{gdocExporting ? 'Google Doc…' : (googleReady ? 'Google Doc' : 'Connect Google')}</span>
-                    </button>
-                </div>
-            </div>
-        )
-    }
 
     const handleTargetSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -1287,62 +1056,142 @@ export default function MedicalLabQADashboard() {
             </div>
             {/* Content */}
             <div className="px-2 sm:px-4 py-6">
-                {currentTab === 'dataEntry' && can.dataEntry && renderDataEntry()}
-                {currentTab === 'charts' && can.charts && renderCharts()}
-                {currentTab === 'alerts' && can.alerts && renderAlerts()}
-                {currentTab === 'targets' && can.targets && renderTargets()}
-                {currentTab === 'reports' && can.reports && renderReports()}
-                {currentTab === 'admin' && isAdmin && renderAdmin()}
+                {currentTab === 'dataEntry' && can.dataEntry && (
+                    <DataEntry
+                        entryForm={entryForm}
+                        setEntryForm={setEntryForm}
+                        branches={branches}
+                        parameters={parameters}
+                        isTech={isTech}
+                        claims={claims}
+                        selectedBranch={selectedBranch}
+                        selectedParameter={selectedParameter}
+                        dateRange={dateRange}
+                        userBranch={userBranch}
+                        setQcData={setQcData}
+                        setRecentQcData={setRecentQcData}
+                        recentRows={recentRows}
+                        alerts={alerts}
+                        recentFilters={recentFilters}
+                        setRecentFilters={setRecentFilters}
+                        recentSortKey={recentSortKey}
+                        recentSortDir={recentSortDir}
+                        toggleRecentSort={toggleRecentSort}
+                    />
+                )}
+                {currentTab === 'charts' && can.charts && (
+                    <Charts
+                        selectedBranch={selectedBranch}
+                        selectedParameter={selectedParameter}
+                        parameters={parameters}
+                        chartData={chartData as any}
+                        targetValues={targetValues}
+                        observedStats={observedStats as any}
+                        setSelectedParameter={setSelectedParameter}
+                    />
+                )}
+                {currentTab === 'alerts' && can.alerts && (
+                    <AlertsView
+                        alerts={alerts}
+                        alertRows={alertRows}
+                        alertFilters={alertFilters}
+                        setAlertFilters={setAlertFilters}
+                        toggleAlertSort={toggleAlertSort}
+                        branches={branches}
+                        acknowledgeAlert={acknowledgeAlert}
+                    />
+                )}
+                {currentTab === 'targets' && can.targets && (
+                    <TargetsView
+                        targetRows={targetRows}
+                        targetFilters={targetFilters}
+                        setTargetFilters={setTargetFilters}
+                        toggleTargetSort={toggleTargetSort}
+                        setShowTargetModal={setShowTargetModal}
+                        setEditingTarget={setEditingTarget}
+                        setTargetForm={setTargetForm}
+                    />
+                )}
+                {currentTab === 'reports' && can.reports && (
+                    <ReportsView
+                        selectedBranch={selectedBranch}
+                        branchName={branchName}
+                        allParameterIdsForBranch={allParameterIdsForBranch}
+                        parameters={parameters}
+                        dateRange={dateRange}
+                        narrativeText={narrativeText}
+                        setNarrativeText={setNarrativeText}
+                        preparedBy={preparedBy}
+                        setPreparedBy={setPreparedBy}
+                        reviewedBy={reviewedBy}
+                        setReviewedBy={setReviewedBy}
+                        allReportStats={allReportStats}
+                        reportAlerts={reportAlerts}
+                        recentProcessed={recentProcessed}
+                        exporting={exporting}
+                        setExporting={setExporting}
+                        gdocExporting={gdocExporting}
+                        setGdocExporting={setGdocExporting}
+                        googleReady={googleReady}
+                        labDetails={labDetails}
+                    />
+                )}
+                {currentTab === 'admin' && isAdmin && (
+                    <AdminView
+                        branches={branches}
+                        branchName={branchName}
+                        branchCreateName={branchCreateName}
+                        setBranchCreateName={setBranchCreateName}
+                        handleBranchCreate={handleBranchCreate}
+                        branchEdit={branchEdit}
+                        setBranchEdit={setBranchEdit}
+                        handleBranchUpdate={handleBranchUpdate}
+                        handleBranchDelete={handleBranchDelete}
+                        technicians={technicians}
+                        techLoading={techLoading}
+                        techCreate={techCreate}
+                        setTechCreate={setTechCreate}
+                        handleTechCreate={handleTechCreate}
+                        techEdit={techEdit}
+                        setTechEdit={setTechEdit}
+                        handleTechUpdate={handleTechUpdate}
+                        handleTechDelete={handleTechDelete}
+                        pwReset={pwReset}
+                        setPwReset={setPwReset}
+                        handlePwReset={handlePwReset}
+                        adminMessage={adminMessage || ''}
+                        parameters={parameters}
+                        refreshParameters={refreshParameters}
+                        setAdminMessage={setAdminMessage}
+                    />
+                )}
             </div>
             {/* Target Modal */}
             {showTargetModal && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-lg p-6 w-full max-w-md">
-                        <div className="flex justify-between items-center mb-4">
-                            <h3 className="text-lg font-semibold">{editingTarget ? 'Edit Target Values' : 'Add Target Values'}</h3>
-                            <button onClick={() => { setShowTargetModal(false); setEditingTarget(null) }} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
-                        </div>
-                        <form onSubmit={handleTargetSubmit} className="space-y-4">
-                            <div>
-                                <label className="block text-sm font-medium mb-1">Branch</label>
-                                <select value={targetForm.branch} onChange={(e) => setTargetForm({ ...targetForm, branch: e.target.value })} className="w-full p-2 border rounded" required>
-                                    {branches.map(b => (<option key={b.id} value={b.id}>{b.name}</option>))}
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium mb-1">Parameter</label>
-                                <select value={targetForm.parameter} onChange={(e) => setTargetForm({ ...targetForm, parameter: e.target.value })} className="w-full p-2 border rounded" required>
-                                    {parameters.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))}
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium mb-1">Level</label>
-                                <select value={targetForm.level} onChange={(e) => setTargetForm({ ...targetForm, level: e.target.value })} className="w-full p-2 border rounded" required>
-                                    <option value="L1">L1</option>
-                                    <option value="L2">L2</option>
-                                    <option value="L3">L3</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium mb-1">Target Mean</label>
-                                <input type="number" step="0.01" value={targetForm.mean} onChange={(e) => setTargetForm({ ...targetForm, mean: e.target.value })} className="w-full p-2 border rounded" required />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium mb-1">Target SD</label>
-                                <input type="number" step="0.01" value={targetForm.sd} onChange={(e) => setTargetForm({ ...targetForm, sd: e.target.value })} className="w-full p-2 border rounded" required />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium mb-1">Valid From</label>
-                                <input type="date" value={targetForm.validFrom} onChange={(e) => setTargetForm({ ...targetForm, validFrom: e.target.value })} className="w-full p-2 border rounded" required />
-                            </div>
-                            <div className="flex gap-2">
-                                <button type="submit" className="flex-1 bg-blue-600 text-white py-2 rounded hover:bg-blue-700">{editingTarget ? 'Update' : 'Add'} Target</button>
-                                <button type="button" onClick={() => { setShowTargetModal(false); setEditingTarget(null) }} className="flex-1 bg-gray-300 text-gray-700 py-2 rounded hover:bg-gray-400">Cancel</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
+                <TargetModal
+                    editingTarget={editingTarget}
+                    targetForm={targetForm}
+                    setTargetForm={setTargetForm}
+                    branches={branches}
+                    parameters={parameters}
+                    handleTargetSubmit={handleTargetSubmit}
+                    setShowTargetModal={setShowTargetModal}
+                    setEditingTarget={setEditingTarget}
+                />
             )}
+            {/* Delete Confirmation Modal */}
+            <DeleteConfirmationModal
+                isOpen={deleteModal.isOpen}
+                title={deleteModal.type === 'branch' ? 'Delete Branch' : 'Delete Technician'}
+                message={deleteModal.type === 'branch'
+                    ? 'Are you sure you want to delete this branch? This action cannot be undone.'
+                    : 'Are you sure you want to delete this technician? This action cannot be undone.'}
+                itemName={deleteModal.item?.name || ''}
+                cascadeOptions={deleteModal.cascadeOptions}
+                onConfirm={confirmDelete}
+                onCancel={cancelDelete}
+                isDeleting={deleteModal.isDeleting}
+            />
         </div>
     )
 }

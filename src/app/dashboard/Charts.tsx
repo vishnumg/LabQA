@@ -7,18 +7,16 @@ import { Download, Image as ImageIcon, SlidersHorizontal } from 'lucide-react'
 type ChartsProps = {
     selectedBranch: string
     selectedParameter: string
-    branches: Array<{ id: string; name: string }>
     parameters: Array<{ id: string; name: string; unit?: string }>
     chartData: { L1: any[]; L2: any[]; L3: any[] }
     targetValues: Record<string, { mean: number; sd: number; validFrom: string }>
     observedStats: Record<string, { n: number; mean: string; sd: string }>
-    setSelectedBranch: (v: string) => void
     setSelectedParameter: (v: string) => void
 }
 
 const LEVELS: Array<'L1' | 'L2' | 'L3'> = ['L1', 'L2', 'L3']
 
-export default function Charts({ selectedBranch, selectedParameter, branches, parameters, chartData, targetValues, observedStats, setSelectedBranch, setSelectedParameter }: ChartsProps) {
+export default function Charts({ selectedBranch, selectedParameter, parameters, chartData, targetValues, observedStats, setSelectedParameter }: ChartsProps) {
     const keyFor = (level: string) => `${selectedBranch}_${selectedParameter}_${level}`
 
     // Helper to format numbers in tooltips (trim long decimals, remove trailing zeros)
@@ -220,20 +218,14 @@ export default function Charts({ selectedBranch, selectedParameter, branches, pa
                     <div className="bg-blue-600 text-white p-2 rounded"><BarChart3 className="w-5 h-5" /></div>
                     <h2 className="text-xl font-semibold">Charts & Analysis</h2>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-                    <div>
-                        <label className="block text-sm font-medium mb-1">Branch</label>
-                        <select value={selectedBranch} onChange={e => setSelectedBranch(e.target.value)} className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500">
-                            {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                        </select>
-                    </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                     <div>
                         <label className="block text-sm font-medium mb-1">Parameter</label>
                         <select value={selectedParameter} onChange={e => setSelectedParameter(e.target.value)} className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500">
                             {parameters.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                         </select>
                     </div>
-                    <div className="col-span-2 flex flex-wrap gap-4 text-sm">
+                    <div className="flex flex-wrap gap-4 text-sm">
                         {LEVELS.map(l => {
                             const t = targetValues[keyFor(l)]
                             return (

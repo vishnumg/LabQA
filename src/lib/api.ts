@@ -37,14 +37,33 @@ export const api = {
     async createQc(entries: Array<{ date: string; parameter: string; branch: string; level: string; value: number; }>) {
         return this.fetchJSON('/api/qc', { method: 'POST', body: JSON.stringify({ entries }) })
     },
+    async updateQc(id: string, value: number) {
+        return this.fetchJSON(`/api/qc/${id}`, { method: 'PUT', body: JSON.stringify({ value }) })
+    },
+    async deleteQc(id: string) {
+        return this.fetchJSON(`/api/qc/${id}`, { method: 'DELETE' })
+    },
     // --- Admin: Branch Management ---
     async adminCreateBranch(name: string) { return this.fetchJSON('/api/admin/branches', { method: 'POST', body: JSON.stringify({ name }) }) },
     async adminUpdateBranch(id: string, name: string) { return this.fetchJSON(`/api/admin/branches/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }) },
-    async adminDeleteBranch(id: string) { return this.fetchJSON(`/api/admin/branches/${id}`, { method: 'DELETE' }) },
+    async adminDeleteBranch(id: string, cascadeOptions?: string[]) {
+        const query = cascadeOptions && cascadeOptions.length > 0 ? '?' + cascadeOptions.map(opt => `cascade=${opt}`).join('&') : ''
+        return this.fetchJSON(`/api/admin/branches/${id}${query}`, { method: 'DELETE' })
+    },
     // --- Admin: Technician Management ---
     async adminListTechnicians() { return this.fetchJSON('/api/admin/technicians') },
     async adminCreateTechnician(email: string, password: string, branch_id?: string | null) { return this.fetchJSON('/api/admin/technicians', { method: 'POST', body: JSON.stringify({ email, password, branch_id }) }) },
     async adminUpdateTechnician(id: string, data: { email?: string; branch_id?: string | null }) { return this.fetchJSON(`/api/admin/technicians/${id}`, { method: 'PUT', body: JSON.stringify(data) }) },
-    async adminDeleteTechnician(id: string) { return this.fetchJSON(`/api/admin/technicians/${id}`, { method: 'DELETE' }) },
-    async adminChangeTechnicianPassword(id: string, password: string) { return this.fetchJSON(`/api/admin/technicians/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) }) }
+    async adminDeleteTechnician(id: string, cascadeOptions?: string[]) {
+        const query = cascadeOptions && cascadeOptions.length > 0 ? '?' + cascadeOptions.map(opt => `cascade=${opt}`).join('&') : ''
+        return this.fetchJSON(`/api/admin/technicians/${id}${query}`, { method: 'DELETE' })
+    },
+    async adminChangeTechnicianPassword(id: string, password: string) { return this.fetchJSON(`/api/admin/technicians/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) }) },
+    // --- Admin: Parameter Management ---
+    async adminCreateParameter(id: string, name: string, unit?: string) { return this.fetchJSON('/api/admin/parameters', { method: 'POST', body: JSON.stringify({ id, name, unit }) }) },
+    async adminUpdateParameter(id: string, data: { name?: string; unit?: string | null }) { return this.fetchJSON(`/api/admin/parameters/${id}`, { method: 'PUT', body: JSON.stringify(data) }) },
+    async adminDeleteParameter(id: string, cascadeOptions?: string[]) {
+        const query = cascadeOptions && cascadeOptions.length > 0 ? '?' + cascadeOptions.map(opt => `cascade=${opt}`).join('&') : ''
+        return this.fetchJSON(`/api/admin/parameters/${id}${query}`, { method: 'DELETE' })
+    }
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 from sqlmodel import SQLModel, Field, Column, Date, Relationship
+from sqlalchemy import UniqueConstraint
 from typing import Optional
 from datetime import date, datetime
 import uuid
@@ -41,6 +42,10 @@ class Parameter(SQLModel, table=True):
 
 class QcEntry(SQLModel, table=True):
     __tablename__ = "qc_entries"  # type: ignore  # align with migration
+    __table_args__ = (
+        UniqueConstraint('branch', 'parameter', 'date', 'level',
+                         name='uq_qc_entry_branch_param_date_level'),
+    )
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     date: date
     parameter: str

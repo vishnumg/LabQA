@@ -41,7 +41,7 @@ def _b64d(data: str) -> str:
 def issue_token(user: User) -> str:
     now = int(time.time())
     exp = now + TOKEN_TTL_SECONDS
-    payload = json.dumps({'sub': str(user.id), 'role': user.role, 'branch_id': str(
+    payload = json.dumps({'sub': str(user.id), 'email': user.email, 'role': user.role, 'branch_id': str(
         user.branch_id) if getattr(user, 'branch_id', None) else None, 'exp': exp})
     b = _b64e(payload)
     sig = _sign([b])
@@ -276,23 +276,105 @@ def admin_update_branch(branch_id: str, body: schemas.BranchUpdate, session=Depe
 
 
 @app.delete("/api/admin/branches/{branch_id}")
-def admin_delete_branch(branch_id: str, session=Depends(db.session), claims=Depends(require_claims)):
+def admin_delete_branch(
+    branch_id: str,
+    cascade: list[str] = Query(default=[]),
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """
+    Delete a branch with optional cascade delete of related data.
+
+    Query parameters:
+    - cascade: List of options to cascade delete. Options: 'qc_entries', 'targets', 'technicians'
+
+    Examples:
+    - DELETE /api/admin/branches/{id}  (fails if branch has related data)
+    - DELETE /api/admin/branches/{id}?cascade=qc_entries&cascade=targets  (deletes branch and related data)
+    """
     if claims.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
+
     try:
         b = session.get(Branch, branch_id)
     except Exception:
         b = None
     if not b:
         raise HTTPException(status_code=404, detail="branch_not_found")
+
     try:
+        # Convert cascade list to set for easier checking
+        cascade_set = set(cascade)
+
+        # 1. Handle QC entries
+        if 'qc_entries' in cascade_set:
+            # Delete all QC entries for this branch
+            qc_stmt = select(QcEntry).where(QcEntry.branch == uuid.UUID(branch_id))
+            qc_entries = session.exec(qc_stmt).all()
+            for entry in qc_entries:
+                session.delete(entry)
+        else:
+            # Check if QC entries exist
+            qc_stmt = select(QcEntry).where(QcEntry.branch == uuid.UUID(branch_id))
+            qc_count = len(session.exec(qc_stmt).all())
+            if qc_count > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"branch_in_use: {qc_count} QC entries exist. Use ?cascade=qc_entries to delete them."
+                )
+
+        # 2. Handle targets
+        if 'targets' in cascade_set:
+            # Delete all targets for this branch
+            target_stmt = select(Target).where(Target.branch_id == uuid.UUID(branch_id))
+            targets = session.exec(target_stmt).all()
+            for target in targets:
+                session.delete(target)
+        else:
+            # Check if targets exist
+            target_stmt = select(Target).where(Target.branch_id == uuid.UUID(branch_id))
+            target_count = len(session.exec(target_stmt).all())
+            if target_count > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"branch_in_use: {target_count} targets exist. Use ?cascade=targets to delete them."
+                )
+
+        # 3. Handle technicians (users with branch_id)
+        if 'technicians' in cascade_set:
+            # Delete technicians assigned to this branch
+            user_stmt = select(User).where(
+                User.branch_id == uuid.UUID(branch_id),
+                User.role == 'technician'
+            )
+            users = session.exec(user_stmt).all()
+            for user in users:
+                session.delete(user)
+        else:
+            # Unlink technicians (set branch_id to NULL) instead of checking/blocking
+            user_stmt = select(User).where(
+                User.branch_id == uuid.UUID(branch_id),
+                User.role == 'technician'
+            )
+            users = session.exec(user_stmt).all()
+            for user in users:
+                user.branch_id = None
+                session.add(user)
+
+        # 4. Finally, delete the branch itself
         session.delete(b)
         session.commit()
-    except Exception:
-        # Likely FK constraint (targets, qc entries, users)
+
+        return {"ok": True, "message": "Branch deleted successfully"}
+
+    except HTTPException:
         session.rollback()
-        raise HTTPException(status_code=409, detail="branch_in_use")
-    return {"ok": True}
+        raise
+    except Exception as e:
+        session.rollback()
+        # Log the error for debugging
+        print(f"Error deleting branch {branch_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"delete_failed: {str(e)}")
 
 
 # ---------------- Admin Technician Management ----------------
@@ -372,7 +454,23 @@ def admin_update_technician(user_id: str, body: schemas.TechnicianUpdate, sessio
 
 
 @app.delete("/api/admin/technicians/{user_id}")
-def admin_delete_technician(user_id: str, session=Depends(db.session), claims=Depends(require_claims)):
+def admin_delete_technician(
+    user_id: str,
+    cascade: list[str] = Query(default=[]),
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """
+    Delete a technician with optional cascade delete of related data.
+
+    Query parameters:
+    - cascade: List of options to cascade delete. Currently no cascade options are needed,
+               but this is here for future extensibility (e.g., if we track technician-specific data).
+
+    Note: QcEntry has an 'entered_by' field but it's not enforced as a FK constraint,
+          so deleting a technician won't cause FK errors. This cascade parameter is
+          prepared for future use when technician tracking is enhanced.
+    """
     if claims.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
     try:
@@ -381,13 +479,31 @@ def admin_delete_technician(user_id: str, session=Depends(db.session), claims=De
         u = None
     if not u or u.role != 'technician':
         raise HTTPException(status_code=404, detail='technician_not_found')
+
     try:
+        # Convert cascade list to set for easier checking
+        cascade_set = set(cascade)
+
+        # Future: Add cascade options here if needed
+        # For example, if we add a FK from QcEntry.entered_by to User.id:
+        # if 'qc_entries' in cascade_set:
+        #     qc_stmt = select(QcEntry).where(QcEntry.entered_by == u.email)
+        #     for entry in session.exec(qc_stmt).all():
+        #         session.delete(entry)
+
+        # Delete the technician
         session.delete(u)
         session.commit()
-    except Exception:
+
+        return {'ok': True, 'message': 'Technician deleted successfully'}
+
+    except HTTPException:
         session.rollback()
-        raise HTTPException(status_code=409, detail='delete_failed')
-    return {'ok': True}
+        raise
+    except Exception as e:
+        session.rollback()
+        print(f"Error deleting technician {user_id}: {str(e)}")
+        raise HTTPException(status_code=409, detail=f'delete_failed: {str(e)}')
 
 
 @app.post("/api/admin/technicians/{user_id}/password")
@@ -412,6 +528,140 @@ def admin_change_technician_password(user_id: str, body: schemas.PasswordChange,
 def list_parameters(session=Depends(db.session), claims=Depends(require_claims)):
     rows = session.exec(select(Parameter).order_by(Parameter.id)).all()
     return schemas.ParameterList(items=[schemas.ParameterOut(id=p.id, name=p.name, unit=p.unit) for p in rows])
+
+
+@app.post("/api/admin/parameters", response_model=schemas.ParameterOut)
+def admin_create_parameter(
+    body: schemas.ParameterCreate,
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """Create a new parameter (admin only)"""
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Validate ID format (lowercase, no spaces, alphanumeric + underscore)
+    param_id = body.id.strip().lower().replace(' ', '_')
+    if not param_id or not param_id.replace('_', '').isalnum():
+        raise HTTPException(status_code=400, detail="Invalid parameter ID format")
+
+    # Check if already exists
+    existing = session.get(Parameter, param_id)
+    if existing:
+        raise HTTPException(status_code=409, detail="parameter_exists")
+
+    # Create parameter
+    param = Parameter(id=param_id, name=body.name.strip(),
+                      unit=body.unit.strip() if body.unit else None)
+    session.add(param)
+    session.commit()
+    session.refresh(param)
+
+    return schemas.ParameterOut(id=param.id, name=param.name, unit=param.unit)
+
+
+@app.put("/api/admin/parameters/{parameter_id}", response_model=schemas.ParameterOut)
+def admin_update_parameter(
+    parameter_id: str,
+    body: schemas.ParameterUpdate,
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """Update a parameter's name and/or unit (admin only)"""
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    param = session.get(Parameter, parameter_id)
+    if not param:
+        raise HTTPException(status_code=404, detail="parameter_not_found")
+
+    # Update fields if provided
+    if body.name is not None:
+        param.name = body.name.strip()
+    if body.unit is not None:
+        param.unit = body.unit.strip() if body.unit.strip() else None
+
+    session.add(param)
+    session.commit()
+    session.refresh(param)
+
+    return schemas.ParameterOut(id=param.id, name=param.name, unit=param.unit)
+
+
+@app.delete("/api/admin/parameters/{parameter_id}")
+def admin_delete_parameter(
+    parameter_id: str,
+    cascade: list[str] = Query(default=[]),
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """
+    Delete a parameter with optional cascade delete of related data.
+
+    Query parameters:
+    - cascade: List of options to cascade delete. Options: 'targets', 'qc_entries'
+
+    Examples:
+    - DELETE /api/admin/parameters/{id}  (fails if parameter has related data)
+    - DELETE /api/admin/parameters/{id}?cascade=targets&cascade=qc_entries
+    """
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    param = session.get(Parameter, parameter_id)
+    if not param:
+        raise HTTPException(status_code=404, detail="parameter_not_found")
+
+    try:
+        cascade_set = set(cascade)
+
+        # 1. Handle targets
+        if 'targets' in cascade_set:
+            # Delete all targets for this parameter
+            target_stmt = select(Target).where(Target.parameter_id == parameter_id)
+            targets = session.exec(target_stmt).all()
+            for target in targets:
+                session.delete(target)
+        else:
+            # Check if targets exist
+            target_stmt = select(Target).where(Target.parameter_id == parameter_id)
+            target_count = len(session.exec(target_stmt).all())
+            if target_count > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"parameter_in_use: {target_count} targets exist. Use ?cascade=targets to delete them."
+                )
+
+        # 2. Handle QC entries
+        if 'qc_entries' in cascade_set:
+            # Delete all QC entries for this parameter
+            qc_stmt = select(QcEntry).where(QcEntry.parameter == parameter_id)
+            qc_entries = session.exec(qc_stmt).all()
+            for entry in qc_entries:
+                session.delete(entry)
+        else:
+            # Check if QC entries exist
+            qc_stmt = select(QcEntry).where(QcEntry.parameter == parameter_id)
+            qc_count = len(session.exec(qc_stmt).all())
+            if qc_count > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"parameter_in_use: {qc_count} QC entries exist. Use ?cascade=qc_entries to delete them."
+                )
+
+        # 3. Finally, delete the parameter itself
+        session.delete(param)
+        session.commit()
+
+        return {"ok": True, "message": "Parameter deleted successfully"}
+
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception as e:
+        session.rollback()
+        print(f"Error deleting parameter {parameter_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"delete_failed: {str(e)}")
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +783,23 @@ def create_qc(payload: schemas.QcBulkCreate, session=Depends(db.session), claims
             raise HTTPException(status_code=400, detail=f"Unknown parameter: {e.parameter}")
         if role == "technician" and user_branch and e.branch != user_branch:
             raise HTTPException(status_code=403, detail="Forbidden (branch scope)")
+
+        # Check for duplicate entry
+        existing = session.exec(
+            select(QcEntry).where(
+                QcEntry.branch == uuid.UUID(str(e.branch)),
+                QcEntry.parameter == e.parameter,
+                QcEntry.date == e.date,
+                QcEntry.level == e.level
+            )
+        ).first()
+
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate entry: QC entry already exists for {e.parameter} level {e.level} on {e.date}"
+            )
+
         session.add(QcEntry(
             id=uuid4(),
             date=e.date,
@@ -546,6 +813,89 @@ def create_qc(payload: schemas.QcBulkCreate, session=Depends(db.session), claims
         inserted += 1
     session.commit()
     return schemas.QcBulkResponse(inserted=inserted)
+
+
+@app.put("/api/qc/{entry_id}", response_model=schemas.QcEntryOut)
+def update_qc(
+    entry_id: str,
+    payload: schemas.QcEntryUpdate,
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """Update a QC entry's value. Only accessible by admin or technician with branch access."""
+    role = claims.get("role")
+    if role not in {"admin", "technician"}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    user_branch = claims.get("branch_id")
+
+    # Get the existing entry
+    try:
+        entry_uuid = uuid.UUID(entry_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid entry ID format")
+
+    entry = session.get(QcEntry, entry_uuid)
+    if not entry:
+        raise HTTPException(status_code=404, detail="QC entry not found")
+
+    # Check branch access for technicians
+    if role == "technician" and user_branch:
+        if str(entry.branch) != user_branch:
+            raise HTTPException(status_code=403, detail="Forbidden (branch scope)")
+
+    # Update the value
+    entry.value = payload.value
+    session.add(entry)
+    session.commit()
+    session.refresh(entry)
+
+    # Return updated entry
+    return schemas.QcEntryOut(
+        id=str(entry.id),
+        date=entry.date,
+        parameter=entry.parameter,
+        branch=str(entry.branch),
+        level=entry.level,
+        value=entry.value,
+        enteredBy=entry.entered_by,
+        enteredAt=entry.entered_at,
+    )
+
+
+@app.delete("/api/qc/{entry_id}")
+def delete_qc(
+    entry_id: str,
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """Delete a QC entry. Only accessible by admin or technician with branch access."""
+    role = claims.get("role")
+    if role not in {"admin", "technician"}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    user_branch = claims.get("branch_id")
+
+    # Get the existing entry
+    try:
+        entry_uuid = uuid.UUID(entry_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid entry ID format")
+
+    entry = session.get(QcEntry, entry_uuid)
+    if not entry:
+        raise HTTPException(status_code=404, detail="QC entry not found")
+
+    # Check branch access for technicians
+    if role == "technician" and user_branch:
+        if str(entry.branch) != user_branch:
+            raise HTTPException(status_code=403, detail="Forbidden (branch scope)")
+
+    # Delete the entry
+    session.delete(entry)
+    session.commit()
+
+    return {"message": "QC entry deleted successfully"}
 
 
 # ---------------------------------------------------------------------------
@@ -1073,7 +1423,7 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
 
                     # Set column widths for stats table (in points: 1 inch = 72 points)
                     # Stats table columns: Parameter/Level (wider), n, Mean, SD, CV%
-                    stats_col_widths = [200, 50, 80, 80, 70]  # in points
+                    stats_col_widths = [190, 45, 80, 80, 65]  # in points
                     width_reqs = []
                     for ci, width_pt in enumerate(stats_col_widths):
                         width_reqs.append({
@@ -1208,7 +1558,7 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
                         # Ruler positions: 0, 0.94, 2.34, 2.93, 3.59, 5.76, 6.51 inches
                         # Columns: Date, Parameter, Level, Rule, Description, Severity
                         # in points (1 inch = 72 points)
-                        violations_col_widths = [68, 101, 42, 48, 156, 54]
+                        violations_col_widths = [68, 105, 40, 45, 155, 55]
                         width_reqs = []
                         for ci, width_pt in enumerate(violations_col_widths):
                             width_reqs.append({
