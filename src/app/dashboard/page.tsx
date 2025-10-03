@@ -11,6 +11,7 @@ import { api } from '../../lib/api'
 // Extracted modules
 import type { QcEntry, TargetVersion, Alert, Branch, Parameter, Technician, LabDetails, EntryForm, TargetForm, DateRange, TabType } from './types'
 import { formatDateDisplay, formatDateTimeDisplay, effectiveTarget, calculateZ, evaluateRules, calculateObservedStats, getEffectiveTargetMap } from './utils'
+import { makeTargetKey, parseTargetKey, type TargetKey } from './targetKeyHelpers'
 import { useBranches, useParameters, useTargets, useQcData, useRecentQcData, useTechnicians } from './hooks'
 import DataEntry from './components/DataEntry'
 import AlertsView from './components/AlertsView'
@@ -117,7 +118,7 @@ export default function MedicalLabQADashboard() {
             if (t.ok && Array.isArray(t.json?.items)) {
                 const versions: TargetVersionsMap = {}
                 t.json.items.forEach((it: any) => {
-                    const key = `${it.branch_id}_${it.parameter_id}_${it.level}`
+                    const key = makeTargetKey(it.branch_id, it.parameter_id, it.level)
                     if (!versions[key]) versions[key] = []
                     versions[key].push({ mean: it.mean, sd: it.sd, validFrom: it.validFrom })
                 })
@@ -135,6 +136,28 @@ export default function MedicalLabQADashboard() {
         load()
         return () => { cancelled = true }
     }, [ready, claims])
+
+    // Refresh targets function (for use after edit/delete operations)
+    const refreshTargets = async () => {
+        const t = await api.getTargets()
+        if (t.ok && Array.isArray(t.json?.items)) {
+            const versions: TargetVersionsMap = {}
+            t.json.items.forEach((it: any) => {
+                const key = makeTargetKey(it.branch_id, it.parameter_id, it.level)
+                if (!versions[key]) versions[key] = []
+                versions[key].push({ mean: it.mean, sd: it.sd, validFrom: it.validFrom })
+            })
+            Object.keys(versions).forEach(k => versions[k].sort((a, b) => a.validFrom.localeCompare(b.validFrom)))
+            setTargetVersions(versions)
+            const eff: TargetMap = {}
+            Object.entries(versions).forEach(([k, arr]) => {
+                let chosen = arr[0]
+                for (const v of arr) { if (v.validFrom <= dateRange.end) chosen = v; else break }
+                eff[k] = chosen
+            })
+            setTargetValues(eff)
+        }
+    }
 
     // Technician defaults & parameter selection
     useEffect(() => {
@@ -297,13 +320,27 @@ export default function MedicalLabQADashboard() {
     const [targetFilters, setTargetFilters] = useState<Record<string, string>>({ branch: '', parameter: '', level: '', mean: '', sd: '', validFrom: '' })
     const toggleTargetSort = (key: string) => { if (targetSortKey === key) setTargetSortDir(targetSortDir === 'asc' ? 'desc' : 'asc'); else { setTargetSortKey(key); setTargetSortDir('asc') } }
     const targetRows = useMemo(() => {
-        const rows = Object.entries(targetVersions).map(([key, versions]) => {
-            const [branchId, parameterId, level] = key.split('_')
+        const rows: any[] = []
+        Object.entries(targetVersions).forEach(([key, versions]) => {
+            const { branchId, parameterId, level } = parseTargetKey(key)
             const branch = branches.find(b => b.id === branchId)
             const parameter = parameters.find(p => p.id === parameterId)
-            const latest = versions[versions.length - 1]
-            return { key, branchName: branch?.name || branchId, branchId, parameterName: parameter?.name || parameterId, parameterId, level, mean: latest.mean, sd: latest.sd, validFrom: latest.validFrom, latest }
-        }).filter(r => {
+            // Create a row for EACH version, not just the latest
+            versions.forEach((version) => {
+                rows.push({
+                    key: `${key}_${version.validFrom}`,
+                    branchName: branch?.name || branchId,
+                    branchId,
+                    parameterName: parameter?.name || parameterId,
+                    parameterId,
+                    level,
+                    mean: version.mean,
+                    sd: version.sd,
+                    validFrom: version.validFrom
+                })
+            })
+        })
+        return rows.filter(r => {
             const m: Record<string, string> = { branch: r.branchName, parameter: r.parameterName, level: r.level, mean: String(r.mean), sd: String(r.sd), validFrom: r.validFrom }
             return Object.entries(targetFilters).every(([k, v]) => (v || '').trim() === '' || (m[k] || '').toLowerCase().includes(v.toLowerCase().trim()))
         }).sort((a, b) => {
@@ -312,7 +349,6 @@ export default function MedicalLabQADashboard() {
             if (typeof va === 'number' && typeof vb === 'number') return targetSortDir === 'asc' ? va - vb : vb - va
             return targetSortDir === 'asc' ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va))
         })
-        return rows
     }, [targetVersions, branches, parameters, targetFilters, targetSortKey, targetSortDir])
 
 
@@ -803,7 +839,10 @@ export default function MedicalLabQADashboard() {
         })
 
         // Always offer to delete targets
-        const targetCount = Object.keys(targetVersions).filter(k => k.startsWith(branchId + '_')).length
+        const targetCount = Object.keys(targetVersions).filter(k => {
+            const { branchId: keyBranchId } = parseTargetKey(k)
+            return keyBranchId === branchId
+        }).length
         options.push({
             id: 'targets',
             label: targetCount > 0 ? `${targetCount} Target Configurations` : 'Target Configurations (if any)',
@@ -940,7 +979,7 @@ export default function MedicalLabQADashboard() {
         const body = { branch_id: targetForm.branch, parameter_id: targetForm.parameter, level: targetForm.level, mean: parseFloat(targetForm.mean), sd: parseFloat(targetForm.sd), validFrom: targetForm.validFrom }
         const res = await api.upsertTarget(body)
         if (res.ok) {
-            const key = `${targetForm.branch}_${targetForm.parameter}_${targetForm.level}`
+            const key = makeTargetKey(targetForm.branch, targetForm.parameter, targetForm.level)
             setTargetVersions(prev => {
                 const arr = [...(prev[key] || [])]
                 arr.push({ mean: body.mean, sd: body.sd, validFrom: body.validFrom })
@@ -1110,6 +1149,7 @@ export default function MedicalLabQADashboard() {
                         setShowTargetModal={setShowTargetModal}
                         setEditingTarget={setEditingTarget}
                         setTargetForm={setTargetForm}
+                        onTargetUpdated={refreshTargets}
                     />
                 )}
                 {currentTab === 'reports' && can.reports && (

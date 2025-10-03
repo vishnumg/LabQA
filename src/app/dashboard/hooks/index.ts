@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../../../lib/api'
 import type { Branch, Parameter, TargetVersionsMap, TargetMap, QcEntry, DateRange, Technician } from '../types'
 import { getEffectiveTargetMap } from '../utils'
+import { makeTargetKey } from '../targetKeyHelpers'
 
 /**
  * Hook to fetch and manage branches
@@ -68,7 +69,7 @@ export const useTargets = (ready: boolean, claims: any, dateRange: DateRange) =>
             if (t.ok && Array.isArray(t.json?.items)) {
                 const versions: TargetVersionsMap = {}
                 t.json.items.forEach((it: any) => {
-                    const key = `${it.branch_id}_${it.parameter_id}_${it.level}`
+                    const key = makeTargetKey(it.branch_id, it.parameter_id, it.level)
                     if (!versions[key]) versions[key] = []
                     versions[key].push({
                         mean: it.mean,

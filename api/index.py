@@ -715,6 +715,54 @@ def upsert_target(payload: schemas.TargetUpsert, session=Depends(db.session), cl
     return schemas.UpsertResponse(ok=True)
 
 
+@app.put("/api/targets/{branch_id}/{parameter_id}/{level}/{valid_from}", response_model=schemas.UpsertResponse)
+def update_target(
+    branch_id: str,
+    parameter_id: str,
+    level: str,
+    valid_from: str,
+    payload: schemas.TargetUpdate,
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """Update an existing target version"""
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if level not in ALLOWED_LEVELS:
+        raise HTTPException(status_code=400, detail="Invalid level")
+
+    existing = session.get(Target, (branch_id, parameter_id, level, valid_from))
+    if not existing:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    existing.mean = payload.mean
+    existing.sd = payload.sd
+    session.commit()
+    return schemas.UpsertResponse(ok=True)
+
+
+@app.delete("/api/targets/{branch_id}/{parameter_id}/{level}/{valid_from}", response_model=schemas.UpsertResponse)
+def delete_target(
+    branch_id: str,
+    parameter_id: str,
+    level: str,
+    valid_from: str,
+    session=Depends(db.session),
+    claims=Depends(require_claims)
+):
+    """Delete a specific target version"""
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    existing = session.get(Target, (branch_id, parameter_id, level, valid_from))
+    if not existing:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    session.delete(existing)
+    session.commit()
+    return schemas.UpsertResponse(ok=True)
+
+
 # ---------------------------------------------------------------------------
 # QC Entries
 

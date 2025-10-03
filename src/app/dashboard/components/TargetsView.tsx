@@ -1,6 +1,8 @@
-import { Settings, Plus } from 'lucide-react'
+import { Settings, Plus, Edit2, Trash2 } from 'lucide-react'
+import { useState } from 'react'
 import type { Branch, Parameter, TargetForm } from '../types'
 import { formatDateDisplay } from '../utils'
+import { api } from '../../../lib/api'
 
 interface TargetRow {
     key: string
@@ -22,6 +24,7 @@ interface TargetsViewProps {
     setShowTargetModal: (show: boolean) => void
     setEditingTarget: (key: string | null) => void
     setTargetForm: React.Dispatch<React.SetStateAction<TargetForm>>
+    onTargetUpdated: () => void
 }
 
 export default function TargetsView({
@@ -31,8 +34,58 @@ export default function TargetsView({
     toggleTargetSort,
     setShowTargetModal,
     setEditingTarget,
-    setTargetForm
+    setTargetForm,
+    onTargetUpdated
 }: TargetsViewProps) {
+    const [editingRow, setEditingRow] = useState<string | null>(null)
+    const [editValues, setEditValues] = useState<{ mean: string; sd: string }>({ mean: '', sd: '' })
+    const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+
+    const handleEditClick = (row: TargetRow) => {
+        setEditingRow(row.key)
+        setEditValues({ mean: String(row.mean), sd: String(row.sd) })
+    }
+
+    const handleSaveEdit = async (row: TargetRow) => {
+        const mean = parseFloat(editValues.mean)
+        const sd = parseFloat(editValues.sd)
+        if (isNaN(mean) || isNaN(sd)) {
+            alert('Mean and SD must be valid numbers')
+            return
+        }
+
+        const result = await api.updateTarget(row.branchId, row.parameterId, row.level, row.validFrom, { mean, sd })
+        if (result.ok) {
+            setEditingRow(null)
+            onTargetUpdated()
+        } else {
+            alert('Failed to update target')
+        }
+    }
+
+    const handleCancelEdit = () => {
+        setEditingRow(null)
+        setEditValues({ mean: '', sd: '' })
+    }
+
+    const handleDeleteClick = (row: TargetRow) => {
+        setDeleteConfirm(row.key)
+    }
+
+    const handleConfirmDelete = async (row: TargetRow) => {
+        const result = await api.deleteTarget(row.branchId, row.parameterId, row.level, row.validFrom)
+        if (result.ok) {
+            setDeleteConfirm(null)
+            onTargetUpdated()
+        } else {
+            alert('Failed to delete target')
+        }
+    }
+
+    const handleCancelDelete = () => {
+        setDeleteConfirm(null)
+    }
+
     return (
         <div className="space-y-6">
             <div className="bg-white rounded-lg shadow p-6">
@@ -115,31 +168,86 @@ export default function TargetsView({
                         </thead>
                         <tbody>
                             {targetRows.map(r => (
-                                <tr key={r.key} className="border-b">
+                                <tr key={r.key} className="border-b hover:bg-gray-50">
                                     <td className="py-2">{r.branchName}</td>
                                     <td className="py-2">{r.parameterName}</td>
                                     <td className="py-2">{r.level}</td>
-                                    <td className="py-2">{r.mean}</td>
-                                    <td className="py-2">{r.sd}</td>
+                                    <td className="py-2">
+                                        {editingRow === r.key ? (
+                                            <input
+                                                type="number"
+                                                step="0.001"
+                                                value={editValues.mean}
+                                                onChange={e => setEditValues(v => ({ ...v, mean: e.target.value }))}
+                                                className="border rounded px-2 py-1 w-24"
+                                            />
+                                        ) : (
+                                            r.mean
+                                        )}
+                                    </td>
+                                    <td className="py-2">
+                                        {editingRow === r.key ? (
+                                            <input
+                                                type="number"
+                                                step="0.001"
+                                                value={editValues.sd}
+                                                onChange={e => setEditValues(v => ({ ...v, sd: e.target.value }))}
+                                                className="border rounded px-2 py-1 w-24"
+                                            />
+                                        ) : (
+                                            r.sd
+                                        )}
+                                    </td>
                                     <td className="py-2">{formatDateDisplay(r.validFrom)}</td>
                                     <td className="py-2">
-                                        <button
-                                            className="text-blue-600 hover:underline"
-                                            onClick={() => {
-                                                setEditingTarget(r.key)
-                                                setShowTargetModal(true)
-                                                setTargetForm({
-                                                    parameter: r.parameterId,
-                                                    level: r.level as 'L1' | 'L2' | 'L3',
-                                                    branch: r.branchId,
-                                                    mean: String(r.mean),
-                                                    sd: String(r.sd),
-                                                    validFrom: r.validFrom
-                                                })
-                                            }}
-                                        >
-                                            Edit
-                                        </button>
+                                        {deleteConfirm === r.key ? (
+                                            <div className="flex gap-2">
+                                                <button
+                                                    className="text-red-600 hover:underline text-xs"
+                                                    onClick={() => handleConfirmDelete(r)}
+                                                >
+                                                    Confirm
+                                                </button>
+                                                <button
+                                                    className="text-gray-600 hover:underline text-xs"
+                                                    onClick={handleCancelDelete}
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        ) : editingRow === r.key ? (
+                                            <div className="flex gap-2">
+                                                <button
+                                                    className="text-green-600 hover:underline text-xs"
+                                                    onClick={() => handleSaveEdit(r)}
+                                                >
+                                                    Save
+                                                </button>
+                                                <button
+                                                    className="text-gray-600 hover:underline text-xs"
+                                                    onClick={handleCancelEdit}
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <div className="flex gap-2">
+                                                <button
+                                                    className="text-blue-600 hover:text-blue-800"
+                                                    onClick={() => handleEditClick(r)}
+                                                    title="Edit"
+                                                >
+                                                    <Edit2 className="w-4 h-4" />
+                                                </button>
+                                                <button
+                                                    className="text-red-600 hover:text-red-800"
+                                                    onClick={() => handleDeleteClick(r)}
+                                                    title="Delete"
+                                                >
+                                                    <Trash2 className="w-4 h-4" />
+                                                </button>
+                                            </div>
+                                        )}
                                     </td>
                                 </tr>
                             ))}

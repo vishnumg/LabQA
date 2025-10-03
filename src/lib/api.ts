@@ -25,6 +25,12 @@ export const api = {
     async getParameters() { return this.fetchJSON('/api/parameters') },
     async getTargets() { return this.fetchJSON('/api/targets') },
     async upsertTarget(body: { branch_id: string; parameter_id: string; level: string; mean: number; sd: number; validFrom: string; }) { return this.fetchJSON('/api/targets', { method: 'PUT', body: JSON.stringify(body) }) },
+    async updateTarget(branchId: string, parameterId: string, level: string, validFrom: string, body: { mean: number; sd: number }) {
+        return this.fetchJSON(`/api/targets/${branchId}/${parameterId}/${level}/${validFrom}`, { method: 'PUT', body: JSON.stringify(body) })
+    },
+    async deleteTarget(branchId: string, parameterId: string, level: string, validFrom: string) {
+        return this.fetchJSON(`/api/targets/${branchId}/${parameterId}/${level}/${validFrom}`, { method: 'DELETE' })
+    },
     async listQc(params: { branch_id?: string; parameter_id?: string; start?: string; end?: string; }) {
         const q = new URLSearchParams()
         if (params.branch_id) q.set('branch_id', params.branch_id)

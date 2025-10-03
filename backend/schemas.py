@@ -87,6 +87,12 @@ class TargetUpsert(BaseModel):
         populate_by_name = True
 
 
+class TargetUpdate(BaseModel):
+    """Schema for updating an existing target (only mean and sd can be changed)"""
+    mean: float
+    sd: float
+
+
 class UpsertResponse(BaseModel):
     ok: bool = True
 

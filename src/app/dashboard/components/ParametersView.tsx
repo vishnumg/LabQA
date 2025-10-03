@@ -2,6 +2,16 @@ import React, { useState } from 'react'
 import { Plus, Edit2, Trash2, X, Check } from 'lucide-react'
 import { api } from '../../../lib/api'
 
+// Generate a slug from a name (lowercase, replace spaces/special chars with underscores)
+function generateSlug(name: string): string {
+    return name
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]+/g, '_')  // Replace non-alphanumeric with underscore
+        .replace(/^_+|_+$/g, '')      // Remove leading/trailing underscores
+        .replace(/_+/g, '_')          // Replace multiple underscores with single
+}
+
 interface Parameter {
     id: string
     name: string
@@ -31,32 +41,49 @@ export function ParametersView({ parameters, onRefresh, setAdminMessage }: Param
         isDeleting: boolean
     }>({ isOpen: false, parameter: null, cascadeOptions: [], isDeleting: false })
 
-    const [createForm, setCreateForm] = useState({ id: '', name: '', unit: '' })
+    const [createForm, setCreateForm] = useState({ id: '', name: '', unit: '', idTouched: false })
+    const [createError, setCreateError] = useState<string | null>(null)
     const [editForm, setEditForm] = useState({ name: '', unit: '' })
 
     // Create parameter
     const handleCreate = async (e: React.FormEvent) => {
         e.preventDefault()
-        if (!createForm.id || !createForm.name) {
-            setAdminMessage('ID and Name are required')
+        setCreateError(null)
+
+        if (!createForm.name.trim()) {
+            setCreateError('Name is required')
             return
         }
 
-        const r = await api.adminCreateParameter(
-            createForm.id.trim(),
-            createForm.name.trim(),
-            createForm.unit.trim() || undefined
-        )
+        // Use manual ID or auto-generate from name
+        const paramId = createForm.id.trim() || generateSlug(createForm.name)
 
-        if (r.ok) {
-            setAdminMessage('Parameter created successfully')
-            setCreateForm({ id: '', name: '', unit: '' })
-            setShowCreateForm(false)
-            onRefresh()
-        } else if (r.status === 409) {
-            setAdminMessage('Parameter ID already exists')
-        } else {
-            setAdminMessage(r.json?.detail || 'Failed to create parameter')
+        if (!paramId) {
+            setCreateError('Please provide a valid name or ID')
+            return
+        }
+
+        try {
+            const r = await api.adminCreateParameter(
+                paramId,
+                createForm.name.trim(),
+                createForm.unit.trim() || undefined
+            )
+
+            if (r.ok) {
+                setAdminMessage('Parameter created successfully')
+                setCreateForm({ id: '', name: '', unit: '', idTouched: false })
+                setCreateError(null)
+                setShowCreateForm(false)
+                onRefresh()
+            } else if (r.status === 409) {
+                setCreateError(`Parameter ID "${paramId}" already exists. Please choose a different ID or name.`)
+            } else {
+                const errorMsg = r.json?.detail || 'Failed to create parameter'
+                setCreateError(errorMsg)
+            }
+        } catch (err: any) {
+            setCreateError(err.message || 'An unexpected error occurred')
         }
     }
 
@@ -161,7 +188,8 @@ export function ParametersView({ parameters, onRefresh, setAdminMessage }: Param
                         <button
                             onClick={() => {
                                 setShowCreateForm(false)
-                                setCreateForm({ id: '', name: '', unit: '' })
+                                setCreateForm({ id: '', name: '', unit: '', idTouched: false })
+                                setCreateError(null)
                             }}
                             className="text-gray-500 hover:text-gray-700"
                         >
@@ -169,20 +197,26 @@ export function ParametersView({ parameters, onRefresh, setAdminMessage }: Param
                         </button>
                     </div>
                     <form onSubmit={handleCreate} className="space-y-3">
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                ID <span className="text-red-500">*</span>
-                            </label>
-                            <input
-                                type="text"
-                                value={createForm.id}
-                                onChange={(e) => setCreateForm(prev => ({ ...prev, id: e.target.value }))}
-                                placeholder="e.g., glucose, hba1c"
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                                required
-                            />
-                            <p className="text-xs text-gray-500 mt-1">Lowercase, no spaces (use underscores)</p>
-                        </div>
+                        {createError && (
+                            <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg flex items-start gap-2">
+                                <div className="flex-shrink-0 mt-0.5">
+                                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                                    </svg>
+                                </div>
+                                <div className="flex-1">
+                                    <p className="font-medium">Error</p>
+                                    <p className="text-sm">{createError}</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setCreateError(null)}
+                                    className="flex-shrink-0 text-red-600 hover:text-red-800"
+                                >
+                                    <X className="w-5 h-5" />
+                                </button>
+                            </div>
+                        )}
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">
                                 Name <span className="text-red-500">*</span>
@@ -190,11 +224,40 @@ export function ParametersView({ parameters, onRefresh, setAdminMessage }: Param
                             <input
                                 type="text"
                                 value={createForm.name}
-                                onChange={(e) => setCreateForm(prev => ({ ...prev, name: e.target.value }))}
-                                placeholder="e.g., Glucose, HbA1c"
+                                onChange={(e) => {
+                                    const newName = e.target.value
+                                    setCreateForm(prev => ({
+                                        ...prev,
+                                        name: newName,
+                                        // Auto-update ID only if user hasn't manually edited it
+                                        id: prev.idTouched ? prev.id : generateSlug(newName)
+                                    }))
+                                    setCreateError(null)
+                                }}
+                                placeholder="e.g., Glucose, HbA1c, Total Cholesterol"
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                                 required
                             />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                ID <span className="text-red-500">*</span>
+                            </label>
+                            <input
+                                type="text"
+                                value={createForm.id}
+                                onChange={(e) => {
+                                    setCreateForm(prev => ({ ...prev, id: e.target.value, idTouched: true }))
+                                    setCreateError(null)
+                                }}
+                                placeholder="Auto-generated from name, or enter custom"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                            />
+                            <p className="text-xs text-gray-500 mt-1">
+                                {createForm.idTouched
+                                    ? 'Custom ID (lowercase, use underscores for spaces)'
+                                    : 'Auto-generated from name above. Click to edit manually.'}
+                            </p>
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -220,7 +283,8 @@ export function ParametersView({ parameters, onRefresh, setAdminMessage }: Param
                                 type="button"
                                 onClick={() => {
                                     setShowCreateForm(false)
-                                    setCreateForm({ id: '', name: '', unit: '' })
+                                    setCreateForm({ id: '', name: '', unit: '', idTouched: false })
+                                    setCreateError(null)
                                 }}
                                 className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
                             >

@@ -3,6 +3,7 @@ import { BarChart3 } from 'lucide-react'
 import { ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis, ReferenceLine, Tooltip, Legend } from 'recharts'
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { Download, Image as ImageIcon, SlidersHorizontal } from 'lucide-react'
+import { makeTargetKey } from './targetKeyHelpers'
 
 type ChartsProps = {
     selectedBranch: string
@@ -17,7 +18,7 @@ type ChartsProps = {
 const LEVELS: Array<'L1' | 'L2' | 'L3'> = ['L1', 'L2', 'L3']
 
 export default function Charts({ selectedBranch, selectedParameter, parameters, chartData, targetValues, observedStats, setSelectedParameter }: ChartsProps) {
-    const keyFor = (level: string) => `${selectedBranch}_${selectedParameter}_${level}`
+    const keyFor = (level: string) => makeTargetKey(selectedBranch, selectedParameter, level)
 
     // Helper to format numbers in tooltips (trim long decimals, remove trailing zeros)
     const fmt = (n: any, decimals = 3) => {

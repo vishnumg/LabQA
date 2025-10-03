@@ -1,6 +1,7 @@
 // Utility functions for the Medical Lab QA Dashboard
 
 import type { QcEntry, TargetVersion, TargetVersionsMap, Alert, TargetMap, ObservedStats } from './types'
+import { makeTargetKey } from './targetKeyHelpers'
 
 /**
  * Format date from yyyy-MM-dd to dd/MM/yyyy for display
@@ -33,7 +34,7 @@ export const effectiveTarget = (
     level: string,
     onDate: string
 ): TargetVersion | null => {
-    const key = `${branch}_${parameter}_${level}`
+    const key = makeTargetKey(branch, parameter, level)
     const versions = targetVersions[key]
     if (!versions || !versions.length) return null
     let chosen: TargetVersion | null = null
