@@ -1,7 +1,7 @@
 "use client"
 import { BarChart3 } from 'lucide-react'
 import { ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis, ReferenceLine, Tooltip, Legend } from 'recharts'
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Download, Image as ImageIcon, SlidersHorizontal } from 'lucide-react'
 import { makeTargetKey } from './targetKeyHelpers'
 
@@ -29,6 +29,41 @@ export default function Charts({ selectedBranch, selectedParameter, parameters, 
         return num.toFixed(decimals).replace(/\.0+$/, '').replace(/(\.[0-9]*?[1-9])0+$/, '$1')
     }
 
+    // Calculate Y domains for all levels upfront (must be at component level, not inside renderChart)
+    const yDomains = useMemo(() => {
+        const domains: Record<string, any> = {}
+        LEVELS.forEach(level => {
+            const data = chartData[level] || []
+            const target = targetValues[keyFor(level)]
+            const mean = target?.mean
+            const sd = target?.sd
+            const upper3 = mean != null && sd != null ? mean + 3 * sd : undefined
+            const lower3 = mean != null && sd != null ? mean - 3 * sd : undefined
+
+            if (data.length === 0) {
+                domains[level] = ['auto', 'auto']
+            } else {
+                const values = data.map((d: any) => d.value).filter((v: any) => v != null)
+                if (values.length === 0) {
+                    domains[level] = ['auto', 'auto']
+                } else {
+                    let min = Math.min(...values)
+                    let max = Math.max(...values)
+
+                    // Include reference lines in domain calculation
+                    if (lower3 != null) min = Math.min(min, lower3)
+                    if (upper3 != null) max = Math.max(max, upper3)
+
+                    // Add 10% padding for better visualization
+                    const range = max - min
+                    const padding = range > 0 ? range * 0.1 : Math.abs(mean || max) * 0.1
+                    domains[level] = [min - padding, max + padding]
+                }
+            }
+        })
+        return domains
+    }, [chartData, targetValues, selectedBranch, selectedParameter])
+
     const renderChart = (level: 'L1' | 'L2' | 'L3') => {
         const data = chartData[level] || []
         const target = targetValues[keyFor(level)]
@@ -40,6 +75,8 @@ export default function Charts({ selectedBranch, selectedParameter, parameters, 
         const lower2 = mean != null && sd != null ? mean - 2 * sd : undefined
         const upper1 = mean != null && sd != null ? mean + sd : undefined
         const lower1 = mean != null && sd != null ? mean - sd : undefined
+        const yDomain = yDomains[level]
+
         return (
             <div key={level} className="bg-white rounded-lg shadow p-4 space-y-2" data-chart-level={level}>
                 <div className="flex justify-between items-center">
@@ -57,7 +94,7 @@ export default function Charts({ selectedBranch, selectedParameter, parameters, 
                         <LineChart data={data} margin={{ top: 10, left: 4, right: 4, bottom: 0 }}>
                             <CartesianGrid stroke="#eee" strokeDasharray="4 4" />
                             <XAxis dataKey="date" tick={{ fontSize: 10 }} interval={0} angle={-45} textAnchor="end" height={60} />
-                            <YAxis tick={{ fontSize: 10 }} domain={['auto', 'auto']} />
+                            <YAxis tick={{ fontSize: 10 }} domain={yDomain} />
                             <Tooltip formatter={(val: any, _name, ctx) => [fmt(val), ctx?.payload?.zScore != null ? `Value (Z=${fmt(ctx.payload.zScore)})` : 'Value']} />
                             {mean != null && <ReferenceLine y={mean} stroke="#2563eb" strokeWidth={2} />}
                             {upper3 != null && <ReferenceLine y={upper3} stroke="#dc2626" strokeDasharray="4 4" />}
@@ -95,18 +132,47 @@ export default function Charts({ selectedBranch, selectedParameter, parameters, 
 
     const anyZ = combinedData.some(r => LEVELS.some(l => r[`${l}Z`] != null))
 
+    // Calculate Y domain for combined z-score chart based on actual data
+    const combinedZDomain = useMemo(() => {
+        if (!anyZ) return [-4, 4] // Default if no data
+
+        const allZScores: number[] = []
+        combinedData.forEach(r => {
+            LEVELS.forEach(l => {
+                const z = r[`${l}Z`]
+                if (z != null && typeof z === 'number') allZScores.push(z)
+            })
+        })
+
+        if (allZScores.length === 0) return [-4, 4]
+
+        const minZ = Math.min(...allZScores)
+        const maxZ = Math.max(...allZScores)
+
+        // Ensure we include at least -3 to +3 range (standard QC range)
+        // but expand if data goes beyond
+        const domainMin = Math.min(minZ, -3)
+        const domainMax = Math.max(maxZ, 3)
+
+        // Add 10% padding
+        const range = domainMax - domainMin
+        const padding = range * 0.1
+
+        return [domainMin - padding, domainMax + padding]
+    }, [combinedData, anyZ])
+
     // State for legend toggling
     const [visible, setVisible] = useState<Record<string, boolean>>({ L1Z: true, L2Z: true, L3Z: true })
     const toggleSeries = (key: string) => setVisible(v => ({ ...v, [key]: !v[key] }))
 
     // Mouse wheel zoom & drag pan on combined chart
     const [windowIdx, setWindowIdx] = useState<{ start: number; end: number }>({ start: 0, end: combinedData.length - 1 })
-    // Adjust window if data size changes
-    if (windowIdx.end !== combinedData.length - 1 && combinedData.length && windowIdx.end > combinedData.length - 1) {
-        // shrink to new length
-        windowIdx.end = combinedData.length - 1
-        if (windowIdx.start > windowIdx.end) windowIdx.start = 0
-    }
+
+    // Reset zoom whenever data changes
+    useEffect(() => {
+        setWindowIdx({ start: 0, end: Math.max(0, combinedData.length - 1) })
+    }, [combinedData.length, selectedParameter, selectedBranch])
+
     const viewData = useMemo(() => combinedData.slice(windowIdx.start, windowIdx.end + 1), [combinedData, windowIdx])
     const clampWindow = (start: number, end: number) => {
         const max = combinedData.length - 1
@@ -262,7 +328,7 @@ export default function Charts({ selectedBranch, selectedParameter, parameters, 
                         <LineChart data={viewData} margin={{ top: 10, left: 4, right: 8, bottom: 0 }}>
                             <CartesianGrid stroke="#eee" strokeDasharray="4 4" />
                             <XAxis dataKey="date" tick={{ fontSize: 11 }} interval={0} angle={-45} textAnchor="end" height={60} />
-                            <YAxis tick={{ fontSize: 11 }} domain={[-4, 4]} />
+                            <YAxis tick={{ fontSize: 11 }} domain={combinedZDomain} />
                             <Tooltip formatter={(val: any, name: string) => [fmt(val), `${name} Z`]} />
                             <Legend content={customLegend} />
                             {/* Wheel zoom & drag pan replaces Brush */}

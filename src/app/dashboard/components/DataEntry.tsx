@@ -19,13 +19,23 @@ interface DataEntryProps {
     userBranch?: string | null
     setQcData: React.Dispatch<React.SetStateAction<QcEntry[]>>
     setRecentQcData: React.Dispatch<React.SetStateAction<QcEntry[]>>
-    recentRows: Array<QcEntry & { zScore: number | null }>
+    recentRows: {
+        rows: Array<QcEntry & { zScore: number | null }>
+        total: number
+        page: number
+        pageSize: number
+        totalPages: number
+    }
     alerts: Alert[]
     recentFilters: Record<string, string>
     setRecentFilters: React.Dispatch<React.SetStateAction<Record<string, string>>>
     recentSortKey: string
     recentSortDir: 'asc' | 'desc'
     toggleRecentSort: (key: string) => void
+    recentPage: number
+    setRecentPage: React.Dispatch<React.SetStateAction<number>>
+    recentPageSize: number
+    setRecentPageSize: React.Dispatch<React.SetStateAction<number>>
 }
 
 export default function DataEntry({
@@ -45,7 +55,11 @@ export default function DataEntry({
     alerts,
     recentFilters,
     setRecentFilters,
-    toggleRecentSort
+    toggleRecentSort,
+    recentPage,
+    setRecentPage,
+    recentPageSize,
+    setRecentPageSize
 }: DataEntryProps) {
     const [editingId, setEditingId] = useState<string | null>(null)
     const [editValue, setEditValue] = useState<string>('')
@@ -274,8 +288,8 @@ export default function DataEntry({
                             type="submit"
                             disabled={isSubmitting}
                             className={`px-4 py-2 rounded flex items-center gap-2 ${isSubmitting
-                                    ? 'bg-gray-400 cursor-not-allowed'
-                                    : 'bg-blue-600 hover:bg-blue-700'
+                                ? 'bg-gray-400 cursor-not-allowed'
+                                : 'bg-blue-600 hover:bg-blue-700'
                                 } text-white`}
                         >
                             <Save className="w-4 h-4" />
@@ -286,7 +300,7 @@ export default function DataEntry({
             </div>
 
             <div className="bg-white rounded-lg shadow p-6">
-                <h3 className="text-lg font-semibold mb-2">Recent Entries</h3>
+                <h3 className="text-lg font-semibold mb-2">QC Entries ({recentRows.total} in selected date range)</h3>
                 <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mb-3 text-xs">
                     <input
                         placeholder="Filter Date"
@@ -339,7 +353,7 @@ export default function DataEntry({
                             </tr>
                         </thead>
                         <tbody>
-                            {recentRows.map(e => (
+                            {recentRows.rows.map(e => (
                                 <tr key={e.id} className="border-b">
                                     <td className="py-2">{formatDateDisplay(e.date)}</td>
                                     <td className="py-2">{e.parameter}</td>
@@ -415,6 +429,63 @@ export default function DataEntry({
                             ))}
                         </tbody>
                     </table>
+                </div>
+
+                {/* Pagination Controls */}
+                <div className="mt-4 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm">
+                    <div className="flex items-center gap-2">
+                        <span className="text-gray-600">
+                            Showing {recentRows.rows.length === 0 ? 0 : ((recentPage - 1) * recentPageSize + 1)} to{' '}
+                            {Math.min(recentPage * recentPageSize, recentRows.total)} of {recentRows.total} entries
+                        </span>
+                        <select
+                            value={recentPageSize}
+                            onChange={e => {
+                                setRecentPageSize(Number(e.target.value))
+                                setRecentPage(1) // Reset to first page when changing page size
+                            }}
+                            className="border rounded px-2 py-1 text-sm"
+                        >
+                            <option value={10}>10 per page</option>
+                            <option value={20}>20 per page</option>
+                            <option value={50}>50 per page</option>
+                            <option value={100}>100 per page</option>
+                        </select>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setRecentPage(1)}
+                            disabled={recentPage === 1}
+                            className="px-3 py-1 border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                        >
+                            First
+                        </button>
+                        <button
+                            onClick={() => setRecentPage(p => Math.max(1, p - 1))}
+                            disabled={recentPage === 1}
+                            className="px-3 py-1 border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                        >
+                            Previous
+                        </button>
+                        <span className="px-2">
+                            Page {recentPage} of {recentRows.totalPages || 1}
+                        </span>
+                        <button
+                            onClick={() => setRecentPage(p => Math.min(recentRows.totalPages, p + 1))}
+                            disabled={recentPage >= recentRows.totalPages}
+                            className="px-3 py-1 border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                        >
+                            Next
+                        </button>
+                        <button
+                            onClick={() => setRecentPage(recentRows.totalPages)}
+                            disabled={recentPage >= recentRows.totalPages}
+                            className="px-3 py-1 border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                        >
+                            Last
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
