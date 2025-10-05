@@ -2,18 +2,28 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { api } from '../../lib/api'
+import { useAuth } from '../../lib/auth'
 
 export default function LoginPage() {
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
     const [msg, setMsg] = useState<string | null>(null)
     const router = useRouter()
+    const { setToken } = useAuth()
 
     const onSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
         setMsg(null)
         const res = await api.login(email, password)
-        if (res.ok) { setMsg('Logged in'); router.push('/dashboard') }
+        if (res.ok) {
+            // Get the token from localStorage (api.login sets it there)
+            const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+            if (token) {
+                setToken(token) // Update auth context
+            }
+            setMsg('Logged in')
+            router.push('/dashboard')
+        }
         else setMsg(res.error || 'Login failed')
     }
 

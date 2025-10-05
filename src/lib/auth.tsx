@@ -11,6 +11,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [token, setTokenState] = useState<string | null>(null)
     const [claims, setClaims] = useState<Claims | null>(null)
     const [ready, setReady] = useState(false)
+    const [initialized, setInitialized] = useState(false)
 
     // Helper to check if token is expired
     const isTokenExpired = (claims: Claims | null): boolean => {
@@ -18,31 +19,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return claims.exp * 1000 < Date.now()
     }
 
+    // Initialize token and claims from localStorage
     useEffect(() => {
         const t = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+        console.log('[Auth Init] Token found in localStorage:', !!t)
         if (t) {
-            setTokenState(t)
             try {
                 const [, payload] = t.split('.')
                 const json = JSON.parse(atob(payload)) as Claims
+                console.log('[Auth Init] Token claims:', json)
+                console.log('[Auth Init] Token expires:', new Date(json.exp! * 1000).toISOString())
+                console.log('[Auth Init] Current time:', new Date().toISOString())
                 // Check if token is expired
                 if (isTokenExpired(json)) {
-                    console.log('Token expired, clearing...')
+                    console.log('[Auth Init] Token expired, clearing...')
                     setTokenState(null)
                     setClaims(null)
                     if (typeof window !== 'undefined') localStorage.removeItem('token')
                 } else {
+                    console.log('[Auth Init] Token valid, setting claims')
+                    setTokenState(t)
                     setClaims(json)
                 }
-            } catch {
+            } catch (err) {
+                console.error('[Auth Init] Error parsing token:', err)
+                setTokenState(null)
                 setClaims(null)
             }
         } else {
+            console.log('[Auth Init] No token found')
             setTokenState(null)
             setClaims(null)
         }
-        setReady(true)
+        setInitialized(true)
     }, [])
+
+    // Set ready only AFTER initialization is complete AND claims/token state has settled
+    useEffect(() => {
+        if (initialized) {
+            console.log('[Auth Init] Initialization complete, setting ready. Claims:', !!claims)
+            setReady(true)
+        }
+    }, [initialized, claims])
 
     useEffect(() => {
         if (token) {

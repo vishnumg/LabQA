@@ -67,6 +67,18 @@ export default function MedicalLabQADashboard() {
     const [recentPage, setRecentPage] = useState(1)
     const [recentPageSize, setRecentPageSize] = useState(20)
 
+    // Export state hooks (must be declared before any early returns)
+    const [exporting, setExporting] = useState(false)
+    const [gdocExporting, setGdocExporting] = useState(false)
+    const [googleReady, setGoogleReady] = useState<boolean>(() => !!loadTokens())
+
+    // Refs for report export (must be declared before any early returns)
+    const reportRootRef = useRef<HTMLDivElement | null>(null)
+    const narrativeRef = useRef<HTMLDivElement | null>(null)
+    const statsRef = useRef<HTMLDivElement | null>(null)
+    const chartsRef = useRef<HTMLDivElement | null>(null)
+    const frontMatterRef = useRef<HTMLDivElement | null>(null)
+
     // Admin management state
     const isAdmin = role === 'admin'
 
@@ -110,29 +122,18 @@ export default function MedicalLabQADashboard() {
         recentPageSize
     )
 
-    // Auth check with redirect - AFTER all hooks
+    // ALL useEffect hooks MUST be before early returns
+
+    // Auth check with redirect
     useEffect(() => {
+        console.log('[Dashboard Auth Check] ready:', ready, 'claims:', !!claims, 'redirected:', redirected)
         if (!ready) return
-        if (!claims && typeof window !== 'undefined') {
+        if (!claims && !redirected && typeof window !== 'undefined') {
+            console.log('[Dashboard Auth Check] No claims, redirecting to login')
             window.location.replace('/login')
             setRedirected(true)
         }
-    }, [ready, claims])
-
-    // Early return for loading state - AFTER all hooks
-    if (!ready || (!claims && !redirected)) {
-        return <div className="min-h-screen flex items-center justify-center text-gray-600">Loading…</div>
-    }
-
-    // Display helpers (avoid showing raw UUIDs)
-    const branchName = (id: string | undefined | null) => {
-        if (!id) return ''
-        const b = branches.find(x => x.id === id)
-        return b?.name || id
-    }
-    // User display: email and branch/role
-    const userEmail = claims?.email || claims?.sub || 'User'
-    const userBranchDisplay = isAdmin ? 'Admin' : (userBranch ? branchName(userBranch) : '')
+    }, [ready, claims, redirected])
 
     // Initial load
     useEffect(() => {
@@ -198,6 +199,99 @@ export default function MedicalLabQADashboard() {
         return () => { cancelled = true }
     }, [ready, claims, selectedBranch, dateRange.start, dateRange.end, isTech])
 
+    // Initialize OAuth postMessage listener
+    useEffect(() => {
+        const dispose = initOAuthMessageListener(() => {
+            setGoogleReady(true)
+        })
+        return () => { if (dispose) dispose() }
+    }, [])
+
+    // Tab permission check
+    const can = { dataEntry: role === 'admin' || role === 'tech', charts: role === 'admin' || role === 'viewer', alerts: role === 'admin' || role === 'viewer', targets: role === 'admin', reports: role === 'admin' }
+    const firstAllowedTab: typeof currentTab = (['dataEntry', 'charts', 'alerts', 'targets', 'reports'] as const).find(t => (can as any)[t]) as any || 'charts'
+    useEffect(() => { if (!(can as any)[currentTab]) setCurrentTab(firstAllowedTab) }, [role])
+
+    // Display helpers (avoid showing raw UUIDs)
+    const branchName = (id: string | undefined | null) => {
+        if (!id) return ''
+        const b = branches.find(x => x.id === id)
+        return b?.name || id
+    }
+    const userEmail = claims?.email || claims?.sub || 'User'
+    const userBranchDisplay = isAdmin ? 'Admin' : (userBranch ? branchName(userBranch) : '')
+
+    // Computed values using useMemo (must be before early returns)
+    const filtered = derivedData.filtered
+    const observedStats = useMemo(() => calculateObservedStats(filtered), [filtered])
+
+    const recentProcessed = derivedData.recentProcessed
+    const allParameterIdsForBranch = useMemo(() => {
+        const setP = new Set<string>()
+        recentProcessed.filter(r => r.branch === selectedBranch && new Date(r.date) >= new Date(dateRange.start) && new Date(r.date) <= new Date(dateRange.end)).forEach(r => setP.add(r.parameter))
+        return Array.from(setP).sort()
+    }, [recentProcessed, selectedBranch, dateRange.start, dateRange.end])
+
+    const reportAlerts = useMemo(() => {
+        const branchRows = recentProcessed.filter(r => r.branch === selectedBranch && new Date(r.date) >= new Date(dateRange.start) && new Date(r.date) <= new Date(dateRange.end))
+        const newAlerts: Alert[] = []
+        const sorted = [...branchRows].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+        sorted.forEach((e, idx) => {
+            const z = e.zScore
+            if (z == null) return
+            if (Math.abs(z) > 3) newAlerts.push({ id: `${e.id}_1_3s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '1₃s', severity: 'error', description: `Single result exceeds ±3SD (Z=${z.toFixed(2)})`, acknowledged: false })
+            else if (Math.abs(z) > 2) newAlerts.push({ id: `${e.id}_1_2s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '1₂s', severity: 'warning', description: `Single result exceeds ±2SD (Z=${z.toFixed(2)})`, acknowledged: false })
+            if (idx > 0) {
+                const p = sorted[idx - 1]
+                if (p.parameter === e.parameter && p.level === e.level && p.branch === e.branch && p.zScore != null) {
+                    if (Math.abs(z) > 2 && Math.abs(p.zScore!) > 2 && Math.sign(z) === Math.sign(p.zScore!)) newAlerts.push({ id: `${e.id}_2_2s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '2₂s', severity: 'error', description: `Two consecutive results exceed ±2SD on same side`, acknowledged: false })
+                    if (Math.abs(z - p.zScore!) >= 4) newAlerts.push({ id: `${e.id}_R_4s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: 'R₄s', severity: 'error', description: `Range between consecutive results ≥4SD`, acknowledged: false })
+                }
+            }
+            if (idx >= 3) {
+                const r4 = sorted.slice(idx - 3, idx + 1)
+                if (r4.every(r => r.parameter === e.parameter && r.level === e.level && r.branch === e.branch && r.zScore != null && Math.abs(r.zScore!) > 1 && Math.sign(r.zScore!) === Math.sign(z))) newAlerts.push({ id: `${e.id}_4_1s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '4₁s', severity: 'error', description: `Four consecutive results exceed ±1SD on same side`, acknowledged: false })
+            }
+            if (idx >= 9) {
+                const r10 = sorted.slice(idx - 9, idx + 1)
+                if (r10.every(r => r.parameter === e.parameter && r.level === e.level && r.branch === e.branch && r.zScore != null && Math.sign(r.zScore!) === Math.sign(z))) newAlerts.push({ id: `${e.id}_10_x`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '10ₓ', severity: 'error', description: `Ten consecutive results on same side of mean`, acknowledged: false })
+            }
+        })
+        return newAlerts
+    }, [recentProcessed, selectedBranch, dateRange.start, dateRange.end])
+
+    const allReportStats = useMemo(() => {
+        const stats: Array<{ parameter: string; level: string; n: number; mean: number; sd: number; cv: number | null; rules: Record<string, number>; zShift?: number }> = []
+        const branchRows = recentProcessed.filter(r => r.branch === selectedBranch && new Date(r.date) >= new Date(dateRange.start) && new Date(r.date) <= new Date(dateRange.end))
+        const paramIds = Array.from(new Set(branchRows.map(r => r.parameter)))
+        paramIds.forEach(pid => {
+            (['L1', 'L2', 'L3'] as const).forEach(level => {
+                const rows = branchRows.filter(r => r.parameter === pid && r.level === level)
+                if (!rows.length) return
+                const values = rows.map(r => r.value)
+                const n = values.length
+                const mean = values.reduce((a, b) => a + b, 0) / n
+                const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / n
+                const sd = Math.sqrt(variance)
+                const cv = mean !== 0 ? (sd / Math.abs(mean)) * 100 : null
+                const zScores = rows.map(r => r.zScore).filter((z): z is number => z != null)
+                const zShift = zScores.length ? zScores.reduce((a, b) => a + b, 0) / zScores.length : undefined
+                const ruleCountsMap: Record<string, number> = { '1₂s': 0, '1₃s': 0, '2₂s': 0, 'R₄s': 0, '4₁s': 0, '10ₓ': 0 }
+                reportAlerts.filter(al => al.parameter === pid && al.level === level).forEach(al => { if (al.rule in ruleCountsMap) ruleCountsMap[al.rule]++ })
+                stats.push({ parameter: pid, level, n, mean, sd, cv, rules: ruleCountsMap, zShift })
+            })
+        })
+        return stats
+    }, [recentProcessed, selectedBranch, dateRange.start, dateRange.end, reportAlerts])
+
+    // Early returns AFTER all hooks
+    if (!ready || (!claims && !redirected)) {
+        return <div className="min-h-screen flex items-center justify-center text-gray-600">Loading…</div>
+    }
+    if (!branches.length || !parameters.length) {
+        return <div className="min-h-screen flex items-center justify-center text-gray-600">Loading data…</div>
+    }
+
     // Wrapper functions that use imported utils with local state (now using targetManagement)
     const getEffectiveTarget = (branch: string, parameter: string, level: string, onDate: string) =>
         effectiveTarget(targetManagement.targetVersions, branch, parameter, level, onDate)
@@ -207,10 +301,7 @@ export default function MedicalLabQADashboard() {
 
     // Use derivedData for all computed values
     const processed = derivedData.processed
-    const recentProcessed = derivedData.recentProcessed
     const alerts = derivedData.alerts
-    const filtered = derivedData.filtered
-    const observedStats = useMemo(() => calculateObservedStats(filtered), [filtered])
     const chartData = derivedData.chartData
 
     const acknowledgeAlert = (id: string | number) => {
@@ -263,23 +354,6 @@ export default function MedicalLabQADashboard() {
         a.click()
         URL.revokeObjectURL(url)
     }
-
-    const reportRootRef = useRef<HTMLDivElement | null>(null)
-    const narrativeRef = useRef<HTMLDivElement | null>(null)
-    const statsRef = useRef<HTMLDivElement | null>(null)
-    const chartsRef = useRef<HTMLDivElement | null>(null)
-    const frontMatterRef = useRef<HTMLDivElement | null>(null)
-    const [exporting, setExporting] = useState(false)
-    const [gdocExporting, setGdocExporting] = useState(false)
-    const [googleReady, setGoogleReady] = useState<boolean>(() => !!loadTokens())
-
-    // Initialize OAuth postMessage listener once
-    useEffect(() => {
-        const dispose = initOAuthMessageListener(() => {
-            setGoogleReady(true)
-        })
-        return () => { if (dispose) dispose() }
-    }, [])
 
     // Utility
     const wait = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -634,65 +708,6 @@ export default function MedicalLabQADashboard() {
         }
     }
 
-    // Replace allParameterIdsForBranch to use branch-wide recentProcessed dataset
-    const allParameterIdsForBranch = useMemo(() => {
-        const setP = new Set<string>()
-        recentProcessed.filter(r => r.branch === selectedBranch && new Date(r.date) >= new Date(dateRange.start) && new Date(r.date) <= new Date(dateRange.end)).forEach(r => setP.add(r.parameter))
-        return Array.from(setP).sort()
-    }, [recentProcessed, selectedBranch, dateRange.start, dateRange.end])
-
-    // Calculate alerts for the report period
-    const reportAlerts = useMemo(() => {
-        const branchRows = recentProcessed.filter(r => r.branch === selectedBranch && new Date(r.date) >= new Date(dateRange.start) && new Date(r.date) <= new Date(dateRange.end))
-        const newAlerts: Alert[] = []
-        const sorted = [...branchRows].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-        sorted.forEach((e, idx) => {
-            const z = e.zScore
-            if (z == null) return
-            if (Math.abs(z) > 3) newAlerts.push({ id: `${e.id}_1_3s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '1₃s', severity: 'error', description: `Single result exceeds ±3SD (Z=${z.toFixed(2)})`, acknowledged: false })
-            else if (Math.abs(z) > 2) newAlerts.push({ id: `${e.id}_1_2s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '1₂s', severity: 'warning', description: `Single result exceeds ±2SD (Z=${z.toFixed(2)})`, acknowledged: false })
-            if (idx > 0) {
-                const p = sorted[idx - 1]
-                if (p.parameter === e.parameter && p.level === e.level && p.branch === e.branch && p.zScore != null) {
-                    if (Math.abs(z) > 2 && Math.abs(p.zScore!) > 2 && Math.sign(z) === Math.sign(p.zScore!)) newAlerts.push({ id: `${e.id}_2_2s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '2₂s', severity: 'error', description: `Two consecutive results exceed ±2SD on same side`, acknowledged: false })
-                    if (Math.abs(z - p.zScore!) >= 4) newAlerts.push({ id: `${e.id}_R_4s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: 'R₄s', severity: 'error', description: `Range between consecutive results ≥4SD`, acknowledged: false })
-                }
-            }
-            if (idx >= 3) {
-                const r4 = sorted.slice(idx - 3, idx + 1)
-                if (r4.every(r => r.parameter === e.parameter && r.level === e.level && r.branch === e.branch && r.zScore != null && Math.abs(r.zScore!) > 1 && Math.sign(r.zScore!) === Math.sign(z))) newAlerts.push({ id: `${e.id}_4_1s`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '4₁s', severity: 'error', description: `Four consecutive results exceed ±1SD on same side`, acknowledged: false })
-            }
-            if (idx >= 9) {
-                const r10 = sorted.slice(idx - 9, idx + 1)
-                if (r10.every(r => r.parameter === e.parameter && r.level === e.level && r.branch === e.branch && r.zScore != null && Math.sign(r.zScore!) === Math.sign(z))) newAlerts.push({ id: `${e.id}_10_x`, date: e.date, parameter: e.parameter, branch: e.branch, level: e.level, rule: '10ₓ', severity: 'error', description: `Ten consecutive results on same side of mean`, acknowledged: false })
-            }
-        })
-        return newAlerts
-    }, [recentProcessed, selectedBranch, dateRange.start, dateRange.end])
-
-    // Add allReportStats after allParameterIdsForBranch
-    const allReportStats = useMemo(() => {
-        const stats: Array<{ parameter: string; level: string; n: number; mean: number; sd: number; cv: number | null; rules: Record<string, number>; zShift?: number }> = []
-        const branchRows = recentProcessed.filter(r => r.branch === selectedBranch && new Date(r.date) >= new Date(dateRange.start) && new Date(r.date) <= new Date(dateRange.end))
-        const paramIds = Array.from(new Set(branchRows.map(r => r.parameter)))
-        paramIds.forEach(pid => {
-            (['L1', 'L2', 'L3'] as const).forEach(level => {
-                const rows = branchRows.filter(r => r.parameter === pid && r.level === level)
-                if (!rows.length) return
-                const values = rows.map(r => r.value)
-                const n = values.length
-                const mean = values.reduce((a, b) => a + b, 0) / n
-                const variance = values.reduce((a, v) => a + (v - mean) ** 2, 0) / Math.max(1, n - 1)
-                const sd = Math.sqrt(variance)
-                const cv = mean !== 0 ? (sd / mean) * 100 : null
-                const rules = { '1₂s': 0, '1₃s': 0, '2₂s': 0, 'R₄s': 0, '4₁s': 0, '10ₓ': 0 }
-                rows.forEach(r => { const z = r.zScore; if (z != null) { if (Math.abs(z) >= 3) rules['1₃s']++; else if (Math.abs(z) >= 2) rules['1₂s']++ } })
-                stats.push({ parameter: pid, level, n, mean, sd, cv, rules })
-            })
-        })
-        return stats
-    }, [recentProcessed, selectedBranch, dateRange.start, dateRange.end])
-
     // --- Admin helpers - now using adminOps hook ---
     const refreshBranches = async () => {
         const b = await api.getBranches(); if (b.ok && Array.isArray(b.json?.items)) setBranches(b.json.items)
@@ -715,10 +730,6 @@ export default function MedicalLabQADashboard() {
     }
     const confirmDelete = (selectedOptions: string[]) => adminOps.confirmDelete(selectedOptions, refreshBranches)
 
-    const can = { dataEntry: role === 'admin' || role === 'tech', charts: role === 'admin' || role === 'viewer', alerts: role === 'admin' || role === 'viewer', targets: role === 'admin', reports: role === 'admin' }
-    const firstAllowedTab: typeof currentTab = (['dataEntry', 'charts', 'alerts', 'targets', 'reports'] as const).find(t => (can as any)[t]) as any || 'charts'
-    useEffect(() => { if (!(can as any)[currentTab]) setCurrentTab(firstAllowedTab) }, [role])
-    if (!branches.length || !parameters.length) return <div className="min-h-screen flex items-center justify-center text-gray-600">Loading data…</div>
     // Enhanced return with branch selector, period presets, tabs, content and modal
     return (
         <div className="min-h-screen bg-gray-50">
