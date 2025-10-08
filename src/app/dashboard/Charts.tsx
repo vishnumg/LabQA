@@ -1,5 +1,5 @@
 "use client"
-import { BarChart3 } from 'lucide-react'
+import { BarChart3, Maximize2 } from 'lucide-react'
 import { ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis, ReferenceLine, Tooltip, Legend } from 'recharts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Download, Image as ImageIcon, SlidersHorizontal } from 'lucide-react'
@@ -363,8 +363,15 @@ export default function Charts({ selectedBranch, selectedParameter, parameters, 
                 </div>
                 <div className="flex items-center justify-between mt-2 text-xs text-gray-600">
                     <div>Showing {viewData.length} / {combinedData.length} points</div>
-                    <div className="flex gap-2">
-                        <button onClick={resetZoom} className="px-2 py-1 border rounded hover:bg-gray-50">Reset</button>
+                    <div className="flex gap-2 items-center">
+                        <span className="text-gray-500">Scroll to zoom • Drag to pan</span>
+                        <button
+                            onClick={resetZoom}
+                            className="flex items-center gap-1 px-3 py-1 bg-blue-50 text-blue-600 border border-blue-200 rounded hover:bg-blue-100 font-medium"
+                        >
+                            <Maximize2 size={14} />
+                            Reset Zoom
+                        </button>
                     </div>
                 </div>
                 {!anyZ && <div className="text-xs text-gray-500 mt-2">No z-score data available for the selected range.</div>}
