@@ -356,7 +356,7 @@ export default function DataEntry({
                             {recentRows.rows.map(e => (
                                 <tr key={e.id} className="border-b">
                                     <td className="py-2">{formatDateDisplay(e.date)}</td>
-                                    <td className="py-2">{e.parameter}</td>
+                                    <td className="py-2">{parameters.find(p => p.id === e.parameter)?.name || e.parameter}</td>
                                     <td className="py-2">{e.level}</td>
                                     <td className="py-2">
                                         {editingId === String(e.id) ? (
@@ -374,13 +374,12 @@ export default function DataEntry({
                                     </td>
                                     <td className="py-2">{e.zScore == null ? '—' : e.zScore.toFixed(2)}</td>
                                     <td className="py-2">
-                                        {alerts.some(a =>
-                                            a.date === e.date &&
-                                            a.level === e.level &&
-                                            a.parameter === e.parameter &&
-                                            a.branch === e.branch
-                                        ) ? (
-                                            <span className="text-red-600">Alert</span>
+                                        {e.zScore == null ? (
+                                            <span className="text-gray-500">—</span>
+                                        ) : Math.abs(e.zScore) > 3 ? (
+                                            <span className="text-red-600 font-medium">Critical</span>
+                                        ) : Math.abs(e.zScore) > 2 ? (
+                                            <span className="text-orange-600 font-medium">Warning</span>
                                         ) : (
                                             <span className="text-green-600">OK</span>
                                         )}
