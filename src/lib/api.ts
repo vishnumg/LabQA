@@ -31,12 +31,14 @@ export const api = {
     async deleteTarget(branchId: string, parameterId: string, level: string, validFrom: string) {
         return this.fetchJSON(`/api/targets/${branchId}/${parameterId}/${level}/${validFrom}`, { method: 'DELETE' })
     },
-    async listQc(params: { branch_id?: string; parameter_id?: string; start?: string; end?: string; }) {
+    async listQc(params: { branch_id?: string; parameter_id?: string; start?: string; end?: string; limit?: number; offset?: number; }) {
         const q = new URLSearchParams()
         if (params.branch_id) q.set('branch_id', params.branch_id)
         if (params.parameter_id) q.set('parameter_id', params.parameter_id)
         if (params.start) q.set('start', params.start)
         if (params.end) q.set('end', params.end)
+        if (params.limit !== undefined) q.set('limit', String(params.limit))
+        if (params.offset !== undefined) q.set('offset', String(params.offset))
         const qs = q.toString()
         return this.fetchJSON('/api/qc' + (qs ? `?${qs}` : ''))
     },

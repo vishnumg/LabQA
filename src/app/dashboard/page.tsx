@@ -174,10 +174,41 @@ export default function MedicalLabQADashboard() {
             if (!ready || !claims) return
             if (!selectedBranch || !selectedParameter) return
             const branchId = isTech && userBranch ? userBranch : selectedBranch
-            const r = await api.listQc({ branch_id: branchId, parameter_id: selectedParameter, start: dateRange.start, end: dateRange.end })
-            if (cancelled) return
-            if (r.ok && Array.isArray(r.json?.items)) setQcData(r.json.items as any)
-            else setQcData([])
+
+            // Fetch all data with pagination
+            let allItems: any[] = []
+            let offset = 0
+            const limit = 300 // Testing pagination - will increase after verification
+
+            while (true) {
+                const r = await api.listQc({
+                    branch_id: branchId,
+                    parameter_id: selectedParameter,
+                    start: dateRange.start,
+                    end: dateRange.end,
+                    limit,
+                    offset
+                })
+                if (cancelled) return
+
+                if (!r.ok || !Array.isArray(r.json?.items)) {
+                    // If any request fails, fall back to what we have
+                    break
+                }
+
+                const items = r.json.items as any[]
+                allItems = [...allItems, ...items]
+
+                // Check if we've fetched all data
+                const total = r.json?.total || 0
+                if (allItems.length >= total || items.length === 0) {
+                    break
+                }
+
+                offset += limit
+            }
+
+            setQcData(allItems)
         }
         loadQc()
         return () => { cancelled = true }
@@ -190,10 +221,40 @@ export default function MedicalLabQADashboard() {
             if (!ready || !claims) return
             const branchId = isTech && userBranch ? userBranch : selectedBranch
             if (!branchId) return
-            const r = await api.listQc({ branch_id: branchId, start: dateRange.start, end: dateRange.end })
-            if (cancelled) return
-            if (r.ok && Array.isArray(r.json?.items)) setRecentQcData(r.json.items as any)
-            else setRecentQcData([])
+
+            // Fetch all data with pagination
+            let allItems: any[] = []
+            let offset = 0
+            const limit = 300 // Testing pagination - will increase after verification
+
+            while (true) {
+                const r = await api.listQc({
+                    branch_id: branchId,
+                    start: dateRange.start,
+                    end: dateRange.end,
+                    limit,
+                    offset
+                })
+                if (cancelled) return
+
+                if (!r.ok || !Array.isArray(r.json?.items)) {
+                    // If any request fails, fall back to what we have
+                    break
+                }
+
+                const items = r.json.items as any[]
+                allItems = [...allItems, ...items]
+
+                // Check if we've fetched all data
+                const total = r.json?.total || 0
+                if (allItems.length >= total || items.length === 0) {
+                    break
+                }
+
+                offset += limit
+            }
+
+            setRecentQcData(allItems)
         }
         loadRecent()
         return () => { cancelled = true }

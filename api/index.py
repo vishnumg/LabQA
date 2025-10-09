@@ -772,7 +772,7 @@ def list_qc(
     parameter_id: Optional[str] = Query(default=None),
     start: Optional[str] = Query(default=None),
     end: Optional[str] = Query(default=None),
-    limit: int = Query(default=200, ge=1, le=1000),
+    limit: int = Query(default=200, ge=1, le=300),
     offset: int = Query(default=0, ge=0),
     session=Depends(db.session),
     claims=Depends(require_claims),
@@ -1010,6 +1010,8 @@ class ReportExportRequest(schemas.BaseModel):  # type: ignore
     format: Optional[str] = None  # optional; if provided must be 'gdoc'
     chartImages: list[dict] | None = None  # provided by frontend for gdoc export
     ruleViolations: list[dict] | None = None  # Westgard rule violations
+    preparedBy: str | None = None  # Person who prepared the report
+    reviewedBy: str | None = None  # Person who reviewed the report
 
 # ---------------------------------------------------------------------------
 # Google OAuth (stateless) endpoints
@@ -1169,8 +1171,24 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
 
     Returns a dict with documentId and url.
     """
+    def format_date_display(date_str: str) -> str:
+        """Convert yyyy-mm-dd to dd/mm/yyyy for display"""
+        try:
+            date_obj = dt.datetime.strptime(date_str, '%Y-%m-%d')
+            return date_obj.strftime('%d/%m/%Y')
+        except Exception:
+            return date_str
+
+    def format_datetime_display(datetime_obj: dt.datetime) -> str:
+        """Format datetime as dd-mm-yyyy hh:mm am/pm"""
+        return datetime_obj.strftime('%d-%m-%Y %I:%M %p')
+
     period_from = payload.period.get('from')
     period_to = payload.period.get('to')
+    # Format dates for display (dd/mm/yyyy)
+    period_from_display = format_date_display(period_from) if period_from else period_from
+    period_to_display = format_date_display(period_to) if period_to else period_to
+    # Keep yyyy-mm-dd for filename in title
     title = f"QC Report - {payload.branchName} ({period_from} → {period_to})"
     create_body = json.dumps({'title': title}).encode()
     req = urllib.request.Request(
@@ -1194,7 +1212,7 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
         except Exception:
             return str(v)
 
-    title_line = f"Quality Control Report - {payload.branchName} ({period_from} → {period_to})"
+    title_line = f"Quality Control Report - {payload.branchName} ({period_from_display} → {period_to_display})"
     table_header = ['Parameter / Level', 'n', 'Mean', 'SD', 'CV%']
     stats_rows = []
     for p in payload.parameters:
@@ -1211,10 +1229,18 @@ def _export_report_gdoc(payload: ReportExportRequest, access_token: str) -> dict
         title_line,
         '',
         f"Branch: {payload.branchName}",
-        f"Period: {period_from} → {period_to}",
-        f"Generated: {dt.datetime.utcnow().isoformat()}",
-        ''
+        f"Period: {period_from_display} → {period_to_display}",
+        f"Generated: {format_datetime_display(dt.datetime.utcnow())}",
     ]
+
+    # Add Prepared By and Reviewed By if provided
+    if payload.preparedBy:
+        lines.append(f"Prepared By: {payload.preparedBy}")
+    if payload.reviewedBy:
+        lines.append(f"Reviewed By: {payload.reviewedBy}")
+
+    lines.append('')  # Empty line after metadata
+
     if payload.narrative:
         lines.append('NARRATIVE:')
         lines.extend((payload.narrative or '').split('\n'))

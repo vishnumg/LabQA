@@ -81,7 +81,9 @@ export default function ReportsView({
             recentProcessed,
             selectedBranch,
             reportAlerts,
-            setGdocExporting
+            setGdocExporting,
+            preparedBy,
+            reviewedBy
         })
     }
 
@@ -229,8 +231,8 @@ export default function ReportsView({
                                             <td className="p-2">{a.level}</td>
                                             <td className="p-2">
                                                 <span className={`px-2 py-1 rounded font-medium ${a.rule === '1₂s'
-                                                        ? 'bg-yellow-100 text-yellow-800'
-                                                        : 'bg-red-100 text-red-800'
+                                                    ? 'bg-yellow-100 text-yellow-800'
+                                                    : 'bg-red-100 text-red-800'
                                                     }`}>
                                                     {a.rule}
                                                 </span>
@@ -238,8 +240,8 @@ export default function ReportsView({
                                             <td className="p-2">{a.description}</td>
                                             <td className="p-2">
                                                 <span className={`px-2 py-1 rounded text-xs font-medium ${a.severity === 'error'
-                                                        ? 'bg-red-100 text-red-800'
-                                                        : 'bg-yellow-100 text-yellow-800'
+                                                    ? 'bg-red-100 text-red-800'
+                                                    : 'bg-yellow-100 text-yellow-800'
                                                     }`}>
                                                     {a.severity === 'error' ? 'Critical' : 'Warning'}
                                                 </span>

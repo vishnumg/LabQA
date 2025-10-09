@@ -221,6 +221,8 @@ export const exportGoogleDoc = async (params: {
     selectedBranch: string
     reportAlerts: Alert[]
     setGdocExporting: (val: boolean) => void
+    preparedBy?: string
+    reviewedBy?: string
 }) => {
     const {
         branchName,
@@ -231,7 +233,9 @@ export const exportGoogleDoc = async (params: {
         recentProcessed,
         selectedBranch,
         reportAlerts,
-        setGdocExporting
+        setGdocExporting,
+        preparedBy,
+        reviewedBy
     } = params
 
     setGdocExporting(true)
@@ -293,7 +297,9 @@ export const exportGoogleDoc = async (params: {
             parameters: payloadParameters,
             chartImages,
             ruleViolations,
-            format: 'gdoc'
+            format: 'gdoc',
+            ...(preparedBy && { preparedBy }),
+            ...(reviewedBy && { reviewedBy })
         }
 
         const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
