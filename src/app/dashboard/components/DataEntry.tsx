@@ -380,8 +380,10 @@ export default function DataEntry({
                                             <span className="text-red-600 font-medium">Critical</span>
                                         ) : Math.abs(e.zScore) > 2 ? (
                                             <span className="text-orange-600 font-medium">Warning</span>
+                                        ) : Math.abs(e.zScore) > 1 ? (
+                                            <span className="text-yellow-600 font-medium">OK</span>
                                         ) : (
-                                            <span className="text-green-600">OK</span>
+                                            <span className="text-green-600 font-medium">OK</span>
                                         )}
                                     </td>
                                     <td className="py-2">
