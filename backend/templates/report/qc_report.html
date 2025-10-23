@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>{{ title or 'QC Report' }}</title>
+<style>
+  body { font-family: system-ui, Arial, sans-serif; margin: 28px; font-size: 12px; color:#111; }
+  h1 { font-size: 20px; margin:0 0 8px; }
+  h2 { font-size: 16px; margin:24px 0 8px; }
+  h3 { font-size: 14px; margin:16px 0 6px; }
+  table { width:100%; border-collapse: collapse; font-size: 11px; margin-top:8px; }
+  th, td { border:1px solid #ccc; padding:4px 6px; text-align:left; }
+  th { background:#f0f3f7; }
+  .meta { font-size:11px; color:#555; }
+  .grid { display:flex; flex-wrap:wrap; gap:14px; }
+  .chart { flex: 1 1 300px; border:1px solid #ddd; padding:6px; }
+  .narrative { white-space: pre-wrap; border:1px solid #ddd; background:#fafafa; padding:10px; line-height:1.35; }
+  footer { margin-top:40px; font-size:10px; color:#666; text-align:center; }
+  .small { font-size:10px; }
+  .rules-table td { text-align:center; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Quality Control Report</h1>
+    <div class="meta">Branch: {{ branch_name }}</div>
+    <div class="meta">Period: {{ period.from }} → {{ period.to }}</div>
+    <div class="meta">Generated: {{ generated_at }}</div>
+  </header>
+
+  {% if narrative %}
+  <section>
+    <h2>Narrative</h2>
+    <div class="narrative">{{ narrative }}</div>
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>Parameter Statistics</h2>
+    <table class="rules-table">
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Level</th>
+          <th>n</th>
+          <th>Mean</th>
+          <th>SD</th>
+          <th>CV%</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in parameters %}
+          <tr>
+            <td>{{ p.name }}</td>
+            <td>{{ p.level }}</td>
+            <td>{{ p.stats.n }}</td>
+            <td>{% if p.stats.n %}{{ '%.3f'|format(p.stats.mean) }}{% endif %}</td>
+            <td>{% if p.stats.n > 1 %}{{ '%.3f'|format(p.stats.sd) }}{% endif %}</td>
+            <td>{% if p.stats.cv is not none %}{{ '%.1f'|format(p.stats.cv) }}{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Charts</h2>
+    <div class="grid">
+      {% for p in parameters %}
+        {% if p.svg %}
+        <div class="chart">
+          <div style="font-weight:600;font-size:12px;margin-bottom:4px;">{{ p.name }}</div>
+          {{ p.svg | safe }}
+        </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </section>
+
+  <footer>
+    Generated automatically by LabQA backend.
+  </footer>
+</body>
+</html>

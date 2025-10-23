@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pyjwt
+bcrypt
+psycopg2-binary
+pydantic
+pytest
+httpx
+sqlmodel
+python-dotenv
+jinja2
+google-auth
+google-auth-oauthlib
+google-api-python-client

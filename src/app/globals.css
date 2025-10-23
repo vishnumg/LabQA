@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+/* Custom global tweaks */
+html,
+body {
+    min-height: 100%;
+}
+
+body {
+    background-color: #f8fafc;
+    color: #0f172a;
+    -webkit-font-smoothing: antialiased;
+}
