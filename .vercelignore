@@ -1,0 +1,2 @@
+# Exclude legacy nested frontend copy to prevent double Next.js detection/build
+frontend/

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{ title }}</title>
+  <style>
+    :root { --gray:#444; --border:#999; font-family: system-ui, Arial, sans-serif; }
+    body { margin: 1.25rem; font-size: 14px; color: var(--gray); }
+    h1,h2,h3 { color:#111; margin: 1.2em 0 0.4em; font-weight:600; }
+    h1 { font-size: 1.6rem; }
+    h2 { font-size: 1.25rem; }
+    h3 { font-size: 1.05rem; }
+    table { width:100%; border-collapse: collapse; margin: 0.75rem 0 1.5rem; }
+    th, td { border:1px solid var(--border); padding:4px 6px; text-align:left; }
+    th { background:#f3f3f3; font-weight:600; }
+    tbody tr:nth-child(even) { background:#fafafa; }
+    .meta { margin-bottom:1rem; line-height:1.4; }
+    .narrative { white-space:pre-wrap; background:#f9f9f9; padding:0.75rem; border:1px solid #ddd; border-radius:4px; }
+    .charts { page-break-before: always; }
+    .chart-item { margin:1rem 0 2rem; }
+    .chart-item img, .chart-item svg { max-width:100%; height:auto; display:block; border:1px solid #ccc; background:#fff; }
+    footer { margin-top:2rem; font-size:12px; color:#666; }
+  </style>
+</head>
+<body>
+  <h1>Quality Control Report</h1>
+  <div class="meta">
+    <div><strong>Branch:</strong> {{ branch_name }}</div>
+    <div><strong>Period:</strong> {{ period.from }} → {{ period.to }}</div>
+    <div><strong>Generated:</strong> {{ generated_at }}</div>
+  </div>
+  {% if narrative %}
+  <h2>Narrative</h2>
+  <div class="narrative">{{ narrative }}</div>
+  {% endif %}
+  <h2>Parameter Statistics</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Parameter</th>
+        <th>Level</th>
+        <th>n</th>
+        <th>Mean</th>
+        <th>SD</th>
+        <th>CV%</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for p in parameters %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td>{{ p.level }}</td>
+        <td>{{ p.stats.n }}</td>
+        <td>{% if p.stats.mean is not none %}{{ '%.3f' % p.stats.mean }}{% endif %}</td>
+        <td>{% if p.stats.sd is not none %}{{ '%.3f' % p.stats.sd }}{% endif %}</td>
+        <td>{% if p.stats.cv is not none %}{{ '%.1f' % p.stats.cv }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% set charts = parameters | selectattr('svg') | list %}
+  {% if charts|length > 0 %}
+  <div class="charts">
+    <h2>Charts</h2>
+    {% for c in charts %}
+      <div class="chart-item">
+        <h3>{{ c.name }} (Level {{ c.level }})</h3>
+        {% if c.svg %}
+          {{ c.svg | safe }}
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <footer>QC Report • Generated automatically</footer>
+</body>
+</html>
